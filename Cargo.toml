@@ -1,0 +1,18 @@
+[package]
+name = "socks5-reticulum-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4"
+fast-socks5 = "1.0"
+structopt = "0.3"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+env_logger = "0.9"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+
+[dependencies.reticulum]
+git = "https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs"
+#path = "../../remote/Reticulum-rs"
+version = "0.1.*"
