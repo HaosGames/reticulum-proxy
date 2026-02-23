@@ -12,10 +12,7 @@ use reticulum::{
     destination::{
         self, DestinationDesc, SingleInputDestination,
         link::{LinkEvent, LinkId},
-    },
-    hash::AddressHash,
-    identity::PrivateIdentity,
-    transport::{Transport, TransportConfig},
+    }, hash::AddressHash, identity::PrivateIdentity, iface::tcp_client::TcpClient, transport::{Transport, TransportConfig}
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -100,10 +97,15 @@ async fn spawn_socks_server() -> Result<()> {
 
     let backends = Arc::new(RwLock::new(HashSet::new()));
 
-    info!("Creating Reticulum Client");
     let rns_identitiy = PrivateIdentity::new_from_rand(OsRng);
     let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, false);
     let rns_transport = Transport::new(rns_config);
+    let _client_addr = rns_transport
+        .iface_manager()
+        .lock()
+        .await
+        .spawn(TcpClient::new(opt.reticulum_addr.as_str()), TcpClient::spawn);
+    info!("Connected to Reticulum Instance @ {}", opt.reticulum_addr);
     let rns_client = ReticulumClient::new(rns_transport, rns_identitiy, 1).await;
     info!("Starting Reticulum Client");
     rns_client.run().await;
