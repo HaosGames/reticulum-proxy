@@ -10,32 +10,29 @@ use fast_socks5::{
 use rand_core::OsRng;
 use reticulum::{
     destination::{
-        self, DestinationDesc, SingleInputDestination, SingleOutputDestination,
+        self, DestinationDesc, SingleInputDestination,
         link::{LinkEvent, LinkId},
     },
     hash::AddressHash,
     identity::PrivateIdentity,
-    transport::{self, Transport, TransportConfig},
+    transport::{Transport, TransportConfig},
 };
 use std::{
     collections::{BTreeMap, HashSet},
     future::Future,
-    io::Error,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    ops::Add,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    thread::sleep,
 };
 use structopt::StructOpt;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite},
     net::TcpListener,
     sync::{
         Mutex, RwLock,
-        mpsc::{Receiver, Sender, channel, unbounded_channel},
+        mpsc::{Receiver, Sender, channel},
     },
     task,
 };
@@ -395,7 +392,7 @@ impl AsyncRead for ReticulumStream {
 impl AsyncWrite for ReticulumStream {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let data = buf.iter().cloned().collect();
@@ -417,7 +414,7 @@ impl AsyncWrite for ReticulumStream {
 
     fn poll_shutdown(
         mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         self.received_receiver.close();
         std::task::Poll::Ready(Ok(()))
