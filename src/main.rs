@@ -27,6 +27,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    thread::sleep,
 };
 use structopt::StructOpt;
 use tokio::{
@@ -102,6 +103,14 @@ async fn spawn_socks_server() -> Result<()> {
 
     let backends = Arc::new(RwLock::new(HashSet::new()));
 
+    info!("Creating Reticulum Client");
+    let rns_identitiy = PrivateIdentity::new_from_rand(OsRng);
+    let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, false);
+    let rns_transport = Transport::new(rns_config);
+    let rns_client = ReticulumClient::new(rns_transport, rns_identitiy, 1).await;
+    info!("Starting Reticulum Client");
+    rns_client.run().await;
+
     let listener = TcpListener::bind(&opt.listen_addr).await?;
 
     info!("Listen for socks connections @ {}", &opt.listen_addr);
@@ -110,7 +119,8 @@ async fn spawn_socks_server() -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((socket, _client_addr)) => {
-                spawn_and_log_error(serve_socks5(opt, backends.clone(), socket));
+                let rns_client = rns_client.clone();
+                spawn_and_log_error(serve_socks5(opt, backends.clone(), socket, rns_client));
             }
             Err(err) => {
                 error!("accept error = {:?}", err);
@@ -125,6 +135,7 @@ async fn serve_socks5(
     opt: &Opt,
     backends: Arc<RwLock<HashSet<String>>>,
     socket: tokio::net::TcpStream,
+    rns_client: ReticulumClient,
 ) -> Result<(), SocksError> {
     let (proto, cmd, target_addr) = match &opt.auth {
         AuthMode::NoAuth => Socks5ServerProtocol::accept_no_auth(socket).await?,
@@ -138,10 +149,6 @@ async fn serve_socks5(
     }
     .read_command()
     .await?;
-
-    let rns_identitiy = PrivateIdentity::new_from_rand(OsRng);
-    let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, false);
-    let rns_transport = Transport::new(rns_config);
 
     if cmd != Socks5Command::TCPConnect {
         proto.reply_error(&ReplyError::CommandNotSupported).await?;
@@ -163,7 +170,9 @@ async fn serve_socks5(
             let inner = proto
                 .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
                 .await?;
-            return serve_admin_console(backends, inner).await;
+            let rns_stream = rns_client.establish_connection(&destination).await.unwrap();
+            transfer(inner, rns_stream).await;
+            return Ok(());
         }
     }
 
@@ -197,36 +206,6 @@ async fn serve_socks5(
     Ok(())
 }
 
-async fn serve_admin_console(
-    backends: Arc<RwLock<HashSet<String>>>,
-    socket: tokio::net::TcpStream,
-) -> Result<(), SocksError> {
-    let mut stream = tokio::io::BufReader::new(socket);
-    stream.write_all(b"Welcome to the router admin console! Use LIST, ADD, or REMOVE commands to manage proxies.\n").await?;
-    let mut buf = String::with_capacity(128);
-    while let Ok(_) = stream.read_line(&mut buf).await {
-        if buf.starts_with("LIST") {
-            let backends = backends.read().await;
-            for addr in backends.iter() {
-                stream.write_all(addr.as_bytes()).await?;
-                stream.write_all(b"\n").await?;
-            }
-        } else if buf.starts_with("ADD ") {
-            let mut backends = backends.write().await;
-            if let Some(adr) = buf.strip_prefix("ADD ") {
-                backends.insert(adr.trim().to_owned());
-            }
-        } else if buf.starts_with("REMOVE ") {
-            let mut backends = backends.write().await;
-            if let Some(adr) = buf.strip_prefix("REMOVE ") {
-                backends.remove(adr.trim());
-            }
-        }
-        buf.clear();
-    }
-    Ok(())
-}
-
 fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()>
 where
     F: Future<Output = Result<()>> + Send + 'static,
@@ -255,11 +234,20 @@ struct ReticulumStream {
 
 impl ReticulumClient {
     pub async fn new(
-        in_destination: Arc<Mutex<SingleInputDestination>>,
-        out_destination: AddressHash,
+        mut transport: Transport,
+        id: PrivateIdentity,
         announce_freq_secs: u64,
-    ) -> (Self, Sender<Vec<u8>>, Receiver<Vec<u8>>) {
-        todo!()
+    ) -> Self {
+        let in_destination = transport
+            .add_destination(id, destination::DestinationName::new("rns_vpn", "client"))
+            .await;
+        Self {
+            in_destination,
+            transport: Arc::new(Mutex::new(transport)),
+            destination_descriptions: Default::default(),
+            received_senders: Default::default(),
+            announce_freq_secs,
+        }
     }
     pub async fn establish_connection(
         &self,
@@ -312,7 +300,12 @@ impl ReticulumClient {
         // send announces
         let client = self.clone();
         let announce_loop = async move || loop {
-            client.transport.lock().await.send_announce(&client.in_destination, None).await;
+            client
+                .transport
+                .lock()
+                .await
+                .send_announce(&client.in_destination, None)
+                .await;
             tokio::time::sleep(std::time::Duration::from_secs(
                 client.announce_freq_secs as u64,
             ))
@@ -354,8 +347,7 @@ impl ReticulumClient {
                                 }
                             };
                         }
-                        LinkEvent::Closed => {
-                        }
+                        LinkEvent::Closed => {}
                         LinkEvent::Proof(_) => {}
                     },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -382,11 +374,21 @@ impl ReticulumClient {
 
 impl AsyncRead for ReticulumStream {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        todo!()
+        match self.received_receiver.poll_recv(cx) {
+            std::task::Poll::Ready(Some(data)) => {
+                buf.put_slice(data.as_slice());
+                return std::task::Poll::Ready(Ok(()));
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "",
+            ))),
+        }
     }
 }
 
@@ -396,20 +398,28 @@ impl AsyncWrite for ReticulumStream {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        todo!()
+        let data = buf.iter().cloned().collect();
+        match self.to_send_sender.try_send(data) {
+            Ok(()) => std::task::Poll::Ready(Ok(buf.len())),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => std::task::Poll::Ready(Err(
+                std::io::Error::new(std::io::ErrorKind::ConnectionReset, ""),
+            )),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => std::task::Poll::Pending,
+        }
     }
 
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        todo!()
+        std::task::Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        todo!()
+        self.received_receiver.close();
+        std::task::Poll::Ready(Ok(()))
     }
 }
