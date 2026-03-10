@@ -10,10 +10,15 @@ use fast_socks5::{
 use rand_core::OsRng;
 use reticulum::{
     destination::{
-        self, DestinationDesc, SingleInputDestination,
-        link::{LinkEvent, LinkId},
-    }, hash::AddressHash, identity::PrivateIdentity, iface::tcp_client::TcpClient, transport::{Transport, TransportConfig}
+        self, DestinationDesc, DestinationName, SingleInputDestination,
+        link::{self, Link, LinkEvent, LinkId},
+    },
+    hash::AddressHash,
+    identity::{Identity, PrivateIdentity},
+    iface::tcp_client::TcpClient,
+    transport::{self, Transport, TransportConfig},
 };
+use socks5_reticulum_proxy::ReticulumInstance;
 use std::{
     collections::{BTreeMap, HashSet},
     future::Future,
@@ -100,15 +105,12 @@ async fn spawn_socks_server() -> Result<()> {
     let rns_identitiy = PrivateIdentity::new_from_rand(OsRng);
     let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, false);
     let rns_transport = Transport::new(rns_config);
-    let _client_addr = rns_transport
-        .iface_manager()
-        .lock()
-        .await
-        .spawn(TcpClient::new(opt.reticulum_addr.as_str()), TcpClient::spawn);
+    let _client_addr = rns_transport.iface_manager().lock().await.spawn(
+        TcpClient::new(opt.reticulum_addr.as_str()),
+        TcpClient::spawn,
+    );
     info!("Connected to Reticulum Instance @ {}", opt.reticulum_addr);
-    let rns_client = ReticulumClient::new(rns_transport, rns_identitiy, 1).await;
-    info!("Starting Reticulum Client");
-    rns_client.run().await;
+    let rns_client = ReticulumInstance::new(rns_transport).await;
 
     let listener = TcpListener::bind(&opt.listen_addr).await?;
 
@@ -134,7 +136,7 @@ async fn serve_socks5(
     opt: &Opt,
     backends: Arc<RwLock<HashSet<String>>>,
     socket: tokio::net::TcpStream,
-    rns_client: ReticulumClient,
+    rns_client: ReticulumInstance,
 ) -> Result<(), SocksError> {
     let (proto, cmd, target_addr) = match &opt.auth {
         AuthMode::NoAuth => Socks5ServerProtocol::accept_no_auth(socket).await?,
@@ -169,7 +171,7 @@ async fn serve_socks5(
             let inner = proto
                 .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
                 .await?;
-            let rns_stream = rns_client.establish_connection(&destination).await.unwrap();
+            let rns_stream = rns_client.connect(destination).await.unwrap();
             transfer(inner, rns_stream).await;
             return Ok(());
         }
@@ -217,208 +219,3 @@ where
     })
 }
 
-#[derive(Clone)]
-struct ReticulumClient {
-    in_destination: Arc<Mutex<SingleInputDestination>>,
-    destination_descriptions: Arc<Mutex<BTreeMap<AddressHash, DestinationDesc>>>,
-    received_senders: Arc<Mutex<BTreeMap<LinkId, Sender<Vec<u8>>>>>,
-    announce_freq_secs: u64,
-    transport: Arc<Mutex<Transport>>,
-}
-
-struct ReticulumStream {
-    to_send_sender: Sender<Vec<u8>>,
-    received_receiver: Receiver<Vec<u8>>,
-}
-
-impl ReticulumClient {
-    pub async fn new(
-        mut transport: Transport,
-        id: PrivateIdentity,
-        announce_freq_secs: u64,
-    ) -> Self {
-        let in_destination = transport
-            .add_destination(id, destination::DestinationName::new("rns_vpn", "client"))
-            .await;
-        Self {
-            in_destination,
-            transport: Arc::new(Mutex::new(transport)),
-            destination_descriptions: Default::default(),
-            received_senders: Default::default(),
-            announce_freq_secs,
-        }
-    }
-    pub async fn establish_connection(
-        &self,
-        destination: &AddressHash,
-    ) -> Result<ReticulumStream, std::io::Error> {
-        //search for destination in already received announcements
-        let description_map = self.destination_descriptions.lock().await;
-        let Some(description) = description_map.get(destination) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrNotAvailable,
-                "did not receive an announcement for that address yet",
-            ));
-        };
-
-        //set up link
-        let transport = self.transport.lock().await;
-        let link = transport.link(*description).await;
-        let link_id = link.lock().await.id().clone();
-        log::debug!("created link {} for peer {}", link_id, destination);
-
-        // setup channels
-        let (to_send_sender, mut to_send_receiver) = channel::<Vec<u8>>(1000);
-        let (received_sender, received_receiver) = channel(1000);
-        let mut senders = self.received_senders.lock().await;
-        senders.insert(*destination, received_sender);
-
-        // send loop: read data from to_send channel receiver and send on links
-        let _send_loop = async || {
-            while let Some(bytes) = to_send_receiver.recv().await {
-                log::trace!("got tun bytes ({})", bytes.len());
-                if let Some(link) = transport.find_out_link(&link_id).await {
-                    log::trace!("sending to {} on link {}", destination, link_id);
-                    let link = link.lock().await;
-                    let packet = link.data_packet(&bytes).unwrap();
-                    drop(link);
-                    transport.send_packet(packet).await;
-                } else {
-                    log::warn!("could not get link {}", link_id);
-                }
-            }
-        };
-
-        Ok(ReticulumStream {
-            to_send_sender,
-            received_receiver,
-        })
-    }
-
-    pub async fn run(&self) -> tokio::task::JoinHandle<()> {
-        // send announces
-        let client = self.clone();
-        let announce_loop = async move || loop {
-            client
-                .transport
-                .lock()
-                .await
-                .send_announce(&client.in_destination, None)
-                .await;
-            tokio::time::sleep(std::time::Duration::from_secs(
-                client.announce_freq_secs as u64,
-            ))
-            .await;
-        };
-        // save destination descriptions
-        let client = self.clone();
-        let destination_loop = async move || {
-            let mut announce_recv = client.transport.lock().await.recv_announces().await;
-            while let Ok(announce) = announce_recv.recv().await {
-                let destination = announce.destination.lock().await;
-                let mut destination_map = client.destination_descriptions.lock().await;
-                destination_map.insert(destination.desc.address_hash.clone(), destination.desc);
-            }
-        };
-
-        // upstream link data: put link data into received channel sender
-        let client = self.clone();
-        let receive_loop = async move || {
-            let mut in_link_events = client.transport.lock().await.in_link_events();
-            loop {
-                match in_link_events.recv().await {
-                    Ok(link_event) => match link_event.event {
-                        LinkEvent::Activated => {}
-                        LinkEvent::Data(payload) => {
-                            let mut received_senders = client.received_senders.lock().await;
-                            if let Some(sender) = received_senders.get_mut(&link_event.id) {
-                                log::trace!(
-                                    "link {} payload ({} bytes)",
-                                    link_event.id,
-                                    payload.len()
-                                );
-                                let data: Vec<u8> = payload.as_slice().iter().cloned().collect();
-                                match sender.send(data).await {
-                                    Ok(()) => log::trace!("tun sent {} bytes", payload.len()),
-                                    Err(err) => {
-                                        log::error!("tun error sending bytes: {err:?}");
-                                    }
-                                }
-                            };
-                        }
-                        LinkEvent::Closed => {}
-                        LinkEvent::Proof(_) => {}
-                    },
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::debug!("recv in link event lagged: {n}");
-                    }
-                    Err(err) => {
-                        log::error!("recv in link event error: {err:?}");
-                        break;
-                    }
-                }
-            }
-        };
-        let run_handle = tokio::spawn(async move {
-            tokio::select! {
-              _ = announce_loop() => log::info!("announce loop exited: shutting down"),
-              _ = destination_loop() => log::info!("destination loop exited: shutting down"),
-              _ = receive_loop() => log::info!("receive loop exited: shutting down"),
-              _ = tokio::signal::ctrl_c() => log::info!("got ctrl-c: shutting down")
-            }
-        });
-        run_handle
-    }
-}
-
-impl AsyncRead for ReticulumStream {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.received_receiver.poll_recv(cx) {
-            std::task::Poll::Ready(Some(data)) => {
-                buf.put_slice(data.as_slice());
-                return std::task::Poll::Ready(Ok(()));
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                "",
-            ))),
-        }
-    }
-}
-
-impl AsyncWrite for ReticulumStream {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        let data = buf.iter().cloned().collect();
-        match self.to_send_sender.try_send(data) {
-            Ok(()) => std::task::Poll::Ready(Ok(buf.len())),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => std::task::Poll::Ready(Err(
-                std::io::Error::new(std::io::ErrorKind::ConnectionReset, ""),
-            )),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => std::task::Poll::Pending,
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        self.received_receiver.close();
-        std::task::Poll::Ready(Ok(()))
-    }
-}
