@@ -80,15 +80,17 @@ impl ReticulumInstance {
 
         let transport = self.transport.clone();
         let _receive_loop = tokio::spawn(async move {
+            let mut events = transport.lock().await.in_link_events();
             loop {
-                let transport = transport.lock().await;
-                let mut events = transport.in_link_events();
                 if let Ok(event) = events.recv().await {
-                    if event.id == link_id && event.address_hash == destination {
+                    if event.id == link_id {
                         if let LinkEvent::Data(payload) = event.event {
+                            trace!("received {} bytes over link: {}", payload.len(), link_id);
                             let data = payload.as_slice().iter().cloned().collect();
                             received_sender.send(data).await.unwrap();
                         }
+                    } else {
+                        trace!("ignoring event with id: {}", event.id);
                     }
                 } else {
                     debug!("receive loop ended");
@@ -100,8 +102,8 @@ impl ReticulumInstance {
         let transport = self.transport.clone();
         let _send_loop = tokio::spawn(async move {
             loop {
-                let transport = transport.lock().await;
                 if let Some(event) = to_send_receiver.recv().await {
+                    let transport = transport.lock().await;
                     if let Some(link) = transport.find_in_link(&link_id).await {
                         let packet = link.lock().await.data_packet(event.as_slice()).unwrap();
                         transport.send_packet(packet).await;
@@ -177,9 +179,9 @@ impl ReticulumInstance {
             while let Some(bytes) = to_send_receiver.recv().await {
                 let transport = client.transport.lock().await;
                 log::trace!("got bytes ({}) for outgoing link {}", bytes.len(), link_id);
-                log::trace!("sending to {} on link {}", destination_hash, link_id);
                 let link = link.lock().await;
                 let packet = link.data_packet(&bytes).unwrap();
+                log::trace!("sending to {} on link {}", destination_hash, link_id);
                 transport.send_packet(packet).await;
             }
         });

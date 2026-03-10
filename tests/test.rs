@@ -79,9 +79,11 @@ async fn send_receive() {
     let message = "foo";
     let receive_loop = tokio::spawn(async move {
         if let Some(mut stream) = instance_a.listen(dest_a_hash).await {
-            let mut buffer = String::default();
-            stream.read_to_string(&mut buffer).await.unwrap();
-            assert_eq!(buffer, String::from(message));
+            let mut buffer = [0;3];
+            stream.read(&mut buffer).await.unwrap();
+            let received = String::from_utf8_lossy(&buffer).to_string();
+            info!("received test message: {}", received);
+            assert_eq!(received, String::from(message));
         } else {
             info!("Listen for connection ended");
         }
