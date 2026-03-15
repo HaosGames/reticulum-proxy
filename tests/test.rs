@@ -1,19 +1,23 @@
 use std::{sync::Once, time::Duration};
 
+use bytes::BytesMut;
 use log::info;
 use rand_core::OsRng;
-use reticulum::{destination::DestinationName, identity::PrivateIdentity, iface::{tcp_client::TcpClient, tcp_server::TcpServer}, transport::{Transport, TransportConfig}};
+use reticulum::{
+    destination::DestinationName,
+    identity::PrivateIdentity,
+    iface::{tcp_client::TcpClient, tcp_server::TcpServer},
+    transport::{Transport, TransportConfig},
+};
 use socks5_reticulum_proxy::ReticulumInstance;
-use tokio::time;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time;
 
 static INIT: Once = Once::new();
 
 fn setup() {
     INIT.call_once(|| {
-        env_logger::Builder::from_env(
-            env_logger::Env::default().default_filter_or("trace")
-        ).init()
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init()
     });
 }
 
@@ -21,13 +25,9 @@ async fn build_transport_full(
     name: &str,
     server_addr: &str,
     client_addr: &[&str],
-    retransmit: bool
+    retransmit: bool,
 ) -> Transport {
-    let mut config = TransportConfig::new(
-        name,
-        &PrivateIdentity::new_from_rand(OsRng),
-        true
-    );
+    let mut config = TransportConfig::new(name, &PrivateIdentity::new_from_rand(OsRng), true);
 
     if retransmit {
         config.set_retransmit(true);
@@ -79,7 +79,7 @@ async fn send_receive() {
     let message = "foo";
     let receive_loop = tokio::spawn(async move {
         if let Some(mut stream) = instance_a.listen(dest_a_hash).await {
-            let mut buffer = [0;3];
+            let mut buffer = [0; 3];
             stream.read(&mut buffer).await.unwrap();
             let received = String::from_utf8_lossy(&buffer).to_string();
             info!("received test message: {}", received);
@@ -87,7 +87,6 @@ async fn send_receive() {
         } else {
             info!("Listen for connection ended");
         }
-
     });
     time::sleep(Duration::from_secs(1)).await;
     let send_loop = tokio::spawn(async move {
@@ -98,4 +97,53 @@ async fn send_receive() {
     receive_loop.await.unwrap();
     time::sleep(Duration::from_secs(1)).await;
     send_loop.await.unwrap();
+}
+
+#[tokio::test]
+async fn send_receive_reverse() {
+    setup();
+
+    let mut transport_a = build_transport("a", "127.0.0.1:8181", &[]).await;
+    let transport_b = build_transport("b", "127.0.0.1:8182", &["127.0.0.1:8181"]).await;
+    let id_a = PrivateIdentity::new_from_name("a");
+    let dest_a = transport_a
+        .add_destination(id_a, DestinationName::new("test", "hop"))
+        .await;
+    let dest_a_hash = dest_a.lock().await.desc.address_hash;
+    transport_a.send_announce(&dest_a, None).await;
+    transport_b.recv_announces().await;
+    transport_b.request_path(&dest_a_hash, None, None).await;
+    time::sleep(Duration::from_secs(4)).await;
+
+    let instance_a = ReticulumInstance::new(transport_a).await;
+    let instance_b = ReticulumInstance::new(transport_b).await;
+
+    let message = "foo";
+    let listen_handle = tokio::spawn(async move {
+        if let Some(mut stream) = instance_a.listen(dest_a_hash).await {
+            stream.write(message.as_bytes()).await.unwrap();
+        } else {
+            info!("Listener ended");
+        }
+    });
+    time::sleep(Duration::from_secs(1)).await;
+    let connect_handle = tokio::spawn(async move {
+        let mut stream = instance_b.connect(dest_a_hash).await.unwrap();
+        loop {
+            time::sleep(Duration::from_secs(1)).await;
+            let mut buffer = BytesMut::with_capacity(3);
+            stream.read_buf(&mut buffer).await.unwrap();
+            if buffer.is_empty() {
+                continue;
+            }
+            let received = String::from_utf8_lossy(&buffer).to_string();
+            info!("received test message: {}", received);
+            assert_eq!(received, String::from(message));
+            break;
+        }
+    });
+    time::sleep(Duration::from_secs(1)).await;
+    connect_handle.await.unwrap();
+    time::sleep(Duration::from_secs(1)).await;
+    listen_handle.await.unwrap();
 }

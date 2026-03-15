@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.11"
 log = "0.4"
 fast-socks5 = "1.0"
 structopt = "0.3"

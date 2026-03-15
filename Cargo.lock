@@ -1216,6 +1216,7 @@ name = "socks5-reticulum-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "env_logger 0.9.3",
  "fast-socks5",
  "log",

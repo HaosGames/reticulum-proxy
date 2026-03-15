@@ -59,7 +59,7 @@ impl ReticulumInstance {
                         if event.address_hash == destination {
                             link_id = Some(event.id);
                             debug!(
-                                "got new active incoming link {} for destination {}",
+                                "in link {}: new active incoming link for destination {}",
                                 event.id, destination
                             );
                             break;
@@ -93,29 +93,32 @@ impl ReticulumInstance {
                         trace!("ignoring event with id: {}", event.id);
                     }
                 } else {
-                    debug!("receive loop ended");
+                    debug!("listener in link event receiver ended. Ending Listener receive loop");
                     break;
                 }
             }
+            debug!("listener receive loop ended");
         });
 
         let transport = self.transport.clone();
         let _send_loop = tokio::spawn(async move {
             loop {
-                if let Some(event) = to_send_receiver.recv().await {
+                if let Some(data) = to_send_receiver.recv().await {
+                    trace!("in link {}: sending {} bytes", link_id, data.len());
                     let transport = transport.lock().await;
                     if let Some(link) = transport.find_in_link(&link_id).await {
-                        let packet = link.lock().await.data_packet(event.as_slice()).unwrap();
+                        let packet = link.lock().await.data_packet(data.as_slice()).unwrap();
                         transport.send_packet(packet).await;
                     } else {
                         trace!("could not find link while sending. Ending send loop");
                         break;
                     }
                 } else {
-                    debug!("send_loop ended");
+                    debug!("listener to_send_receiver ended. Ending listener send loop");
                     break;
                 }
             }
+            debug!("listener send_loop ended");
         });
         Some(ReticulumStream {
             to_send_sender,
@@ -143,18 +146,18 @@ impl ReticulumInstance {
         let link = transport.link(description).await;
         let link_id = link.lock().await.id().clone();
         debug!(
-            "created link {} for out destination {}",
+            "out link {}: created for out destination {}",
             link_id, destination_hash
         );
 
         // wait for link activation
         loop {
-            trace!("waiting for outgoing link {} to activate", link_id);
+            trace!("out link {}: waiting for activation", link_id);
             match receiver.recv().await {
                 Ok(event) => {
                     if let LinkEvent::Activated = event.event {
                         if event.id == link_id {
-                            trace!("outgoing link is now active: {}", event.id);
+                            trace!("out link {}: activated", event.id);
                             break;
                         }
                     }
@@ -178,12 +181,13 @@ impl ReticulumInstance {
         let _send_loop = tokio::spawn(async move {
             while let Some(bytes) = to_send_receiver.recv().await {
                 let transport = client.transport.lock().await;
-                log::trace!("got bytes ({}) for outgoing link {}", bytes.len(), link_id);
+                log::trace!("out link {}: got bytes ({})", link_id, bytes.len());
                 let link = link.lock().await;
                 let packet = link.data_packet(&bytes).unwrap();
-                log::trace!("sending to {} on link {}", destination_hash, link_id);
+                log::trace!("out link {}: sending packet to {}", link_id, destination_hash);
                 transport.send_packet(packet).await;
             }
+            debug!("connection send loop ended because to send receiver ended");
         });
 
         // upstream link data: put link data into received channel sender
@@ -192,42 +196,49 @@ impl ReticulumInstance {
             let mut out_link_events = client.transport.lock().await.out_link_events();
             loop {
                 match out_link_events.recv().await {
-                    Ok(link_event) => {
-                        if link_event.id != link_id {
+                    Ok(event) => {
+                        if event.id != link_id {
+                            trace!("ignoring out link event: id {}, destination {}", event.id, event.address_hash);
                             continue;
                         }
-                        if link_event.address_hash != destination_hash {
-                            continue;
-                        }
-                        match link_event.event {
-                            LinkEvent::Activated => {}
+                        match event.event {
+                            LinkEvent::Activated => {
+                                trace!("out link {}: got activated event", link_id);
+                            }
                             LinkEvent::Data(payload) => {
                                 log::trace!(
-                                    "link {} payload ({} bytes)",
-                                    link_event.id,
+                                    "out link {}: received payload ({} bytes)",
+                                    event.id,
                                     payload.len()
                                 );
                                 let data: Vec<u8> = payload.as_slice().iter().cloned().collect();
                                 match received_sender.send(data).await {
-                                    Ok(()) => log::trace!("tun sent {} bytes", payload.len()),
+                                    Ok(()) => {},
                                     Err(err) => {
-                                        log::error!("tun error sending bytes: {err:?}");
+                                        log::error!("out link {}: error while sending received bytes to stream: {err:?}. Ending connection receive loop", link_id);
+                                        break;
                                     }
                                 }
                             }
-                            LinkEvent::Closed => {}
-                            LinkEvent::Proof(_) => {}
+                            LinkEvent::Closed => {
+                                debug!("out link {}: closed. Ending connection receive loop", link_id);
+                                break;
+                            }
+                            LinkEvent::Proof(_) => {
+                                debug!("out link {}: got proof event", link_id);
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::debug!("recv in link event lagged: {n}");
+                        log::debug!("connection out link receiver lagged: {n}");
                     }
                     Err(err) => {
-                        log::error!("recv in link event error: {err:?}");
+                        log::error!("connection out link receiver error: {err:?}");
                         break;
                     }
                 }
             }
+            debug!("connection receive loop ended");
         };
 
         Ok(ReticulumStream {
@@ -246,13 +257,10 @@ impl AsyncRead for ReticulumStream {
         match self.received_receiver.poll_recv(cx) {
             std::task::Poll::Ready(Some(data)) => {
                 buf.put_slice(data.as_slice());
-                return std::task::Poll::Ready(Ok(()));
+                std::task::Poll::Ready(Ok(()))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                "",
-            ))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(()))
         }
     }
 }
