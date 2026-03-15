@@ -73,6 +73,14 @@ impl ReticulumInstance {
             }
         }
         let link_id = link_id.unwrap();
+        let link = self
+            .transport
+            .lock()
+            .await
+            .find_in_link(&link_id)
+            .await
+            .unwrap();
+        link.lock().await.prove_messages(true);
 
         // setup channels
         let (to_send_sender, mut to_send_receiver) = channel::<Vec<u8>>(1000);
@@ -106,13 +114,8 @@ impl ReticulumInstance {
                 if let Some(data) = to_send_receiver.recv().await {
                     trace!("in link {}: sending {} bytes", link_id, data.len());
                     let transport = transport.lock().await;
-                    if let Some(link) = transport.find_in_link(&link_id).await {
-                        let packet = link.lock().await.data_packet(data.as_slice()).unwrap();
-                        transport.send_packet(packet).await;
-                    } else {
-                        trace!("could not find link while sending. Ending send loop");
-                        break;
-                    }
+                    let packet = link.lock().await.data_packet(data.as_slice()).unwrap();
+                    transport.send_packet(packet).await;
                 } else {
                     debug!("listener to_send_receiver ended. Ending listener send loop");
                     break;
@@ -144,6 +147,7 @@ impl ReticulumInstance {
         //set up link
         trace!("creating link for out destination: {}", destination_hash);
         let link = transport.link(description).await;
+        link.lock().await.prove_messages(true);
         let link_id = link.lock().await.id().clone();
         debug!(
             "out link {}: created for out destination {}",
@@ -184,7 +188,11 @@ impl ReticulumInstance {
                 log::trace!("out link {}: got bytes ({})", link_id, bytes.len());
                 let link = link.lock().await;
                 let packet = link.data_packet(&bytes).unwrap();
-                log::trace!("out link {}: sending packet to {}", link_id, destination_hash);
+                log::trace!(
+                    "out link {}: sending packet to {}",
+                    link_id,
+                    destination_hash
+                );
                 transport.send_packet(packet).await;
             }
             debug!("connection send loop ended because to send receiver ended");
@@ -198,7 +206,10 @@ impl ReticulumInstance {
                 match out_link_events.recv().await {
                     Ok(event) => {
                         if event.id != link_id {
-                            trace!("ignoring out link event: id {}, destination {}", event.id, event.address_hash);
+                            trace!(
+                                "ignoring out link event: id {}, destination {}",
+                                event.id, event.address_hash
+                            );
                             continue;
                         }
                         match event.event {
@@ -213,15 +224,21 @@ impl ReticulumInstance {
                                 );
                                 let data: Vec<u8> = payload.as_slice().iter().cloned().collect();
                                 match received_sender.send(data).await {
-                                    Ok(()) => {},
+                                    Ok(()) => {}
                                     Err(err) => {
-                                        log::error!("out link {}: error while sending received bytes to stream: {err:?}. Ending connection receive loop", link_id);
+                                        log::error!(
+                                            "out link {}: error while sending received bytes to stream: {err:?}. Ending connection receive loop",
+                                            link_id
+                                        );
                                         break;
                                     }
                                 }
                             }
                             LinkEvent::Closed => {
-                                debug!("out link {}: closed. Ending connection receive loop", link_id);
+                                debug!(
+                                    "out link {}: closed. Ending connection receive loop",
+                                    link_id
+                                );
                                 break;
                             }
                             LinkEvent::Proof(_) => {
@@ -260,7 +277,7 @@ impl AsyncRead for ReticulumStream {
                 std::task::Poll::Ready(Ok(()))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(()))
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(Ok(())),
         }
     }
 }

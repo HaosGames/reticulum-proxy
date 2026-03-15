@@ -71,7 +71,7 @@ async fn send_receive() {
     transport_a.send_announce(&dest_a, None).await;
     transport_b.recv_announces().await;
     transport_b.request_path(&dest_a_hash, None, None).await;
-    time::sleep(Duration::from_secs(4)).await;
+    time::sleep(Duration::from_secs(1)).await;
 
     let instance_a = ReticulumInstance::new(transport_a).await;
     let instance_b = ReticulumInstance::new(transport_b).await;
@@ -88,14 +88,11 @@ async fn send_receive() {
             info!("Listen for connection ended");
         }
     });
-    time::sleep(Duration::from_secs(1)).await;
     let send_loop = tokio::spawn(async move {
         let mut stream = instance_b.connect(dest_a_hash).await.unwrap();
         stream.write(message.as_bytes()).await.unwrap();
     });
-    time::sleep(Duration::from_secs(1)).await;
     receive_loop.await.unwrap();
-    time::sleep(Duration::from_secs(1)).await;
     send_loop.await.unwrap();
 }
 
@@ -113,7 +110,7 @@ async fn send_receive_reverse() {
     transport_a.send_announce(&dest_a, None).await;
     transport_b.recv_announces().await;
     transport_b.request_path(&dest_a_hash, None, None).await;
-    time::sleep(Duration::from_secs(4)).await;
+    time::sleep(Duration::from_secs(1)).await;
 
     let instance_a = ReticulumInstance::new(transport_a).await;
     let instance_b = ReticulumInstance::new(transport_b).await;
@@ -122,11 +119,11 @@ async fn send_receive_reverse() {
     let listen_handle = tokio::spawn(async move {
         if let Some(mut stream) = instance_a.listen(dest_a_hash).await {
             stream.write(message.as_bytes()).await.unwrap();
+            time::sleep(Duration::from_secs(1)).await;
         } else {
             info!("Listener ended");
         }
     });
-    time::sleep(Duration::from_secs(1)).await;
     let connect_handle = tokio::spawn(async move {
         let mut stream = instance_b.connect(dest_a_hash).await.unwrap();
         loop {
@@ -142,8 +139,6 @@ async fn send_receive_reverse() {
             break;
         }
     });
-    time::sleep(Duration::from_secs(1)).await;
     connect_handle.await.unwrap();
-    time::sleep(Duration::from_secs(1)).await;
     listen_handle.await.unwrap();
 }
