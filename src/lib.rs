@@ -200,7 +200,7 @@ impl ReticulumInstance {
 
         // upstream link data: put link data into received channel sender
         let client = self.clone();
-        let _receive_loop = async move || {
+        let _receive_loop = tokio::spawn(async move {
             let mut out_link_events = client.transport.lock().await.out_link_events();
             loop {
                 match out_link_events.recv().await {
@@ -256,7 +256,7 @@ impl ReticulumInstance {
                 }
             }
             debug!("connection receive loop ended");
-        };
+        });
 
         Ok(ReticulumStream {
             to_send_sender,
