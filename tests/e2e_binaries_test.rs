@@ -170,6 +170,9 @@ async fn e2e_full_flow() {
     
     sleep(Duration::from_secs(2)).await;
     
+    // Give proxy time to connect and initialize
+    sleep(Duration::from_secs(3)).await;
+    
     // Get the hash from reverse-proxy
     let hash = get_reverse_hash().await;
     println!("Reverse proxy hash: {}", hash);

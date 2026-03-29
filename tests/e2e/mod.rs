@@ -27,7 +27,7 @@ pub async fn start_rnsd() -> std::io::Result<tokio::process::Child> {
     let config_dir = rns_config_path();
     std::fs::create_dir_all(&config_dir).ok();
     
-    // Create minimal Reticulum config (this is a directory, not a file)
+    // Create Reticulum config - shared instance for test
     let config_content = r#"
 [reticulum]
 shared_instance = yes
