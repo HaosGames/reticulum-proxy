@@ -78,7 +78,16 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
             .add_destination(rns_identity.clone(), destination_name)
             .await;
         let destination_hash = destination.lock().await.desc.address_hash;
-        mapping.1.address_hash = Some(destination_hash.to_hex_string());
+        let hash_str = destination_hash.to_hex_string();
+        mapping.1.address_hash = Some(hash_str.clone());
+        
+        // Write hash to file for discovery
+        let hash_file = std::path::PathBuf::from("/tmp/reticulum-reverse-hash");
+        use tokio::io::AsyncWriteExt;
+        if let Ok(mut file) = tokio::fs::File::create(&hash_file).await {
+            file.write_all(format!("{}:{}", mapping.0, hash_str).as_bytes()).await.ok();
+            info!("Wrote hash to /tmp/reticulum-reverse-hash");
+        }
     }
 
     let rns_client = ReticulumInstance::new(rns_transport).await;
