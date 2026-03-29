@@ -23,7 +23,7 @@ pub fn rns_config_path() -> PathBuf {
 }
 
 /// Start rnsd (Reticulum daemon) as a subprocess
-pub async fn start_rnsd() -> std::io::Result<Child> {
+pub async fn start_rnsd() -> std::io::Result<tokio::process::Child> {
     let config_dir = rns_config_path();
     std::fs::create_dir_all(&config_dir).ok();
     
@@ -57,13 +57,13 @@ enabled = yes
 }
 
 /// Stop rnsd subprocess
-pub async fn stop_rnsd(mut child: Child) {
+pub async fn stop_rnsd(mut child: tokio::process::Child) {
     child.kill().await.ok();
     child.wait().await.ok();
 }
 
 /// Start TCP echo server using socat
-pub async fn start_tcp_echo_server(port: u16) -> Child {
+pub async fn start_tcp_echo_server(port: u16) -> tokio::process::Child {
     let port_str = port.to_string();
     let child = tokio::process::Command::new("socat")
         .arg(format!("TCP-LISTEN:{}", port_str))
@@ -78,7 +78,7 @@ pub async fn start_tcp_echo_server(port: u16) -> Child {
 }
 
 /// Stop TCP echo server
-pub async fn stop_tcp_echo_server(mut child: Child) {
+pub async fn stop_tcp_echo_server(mut child: tokio::process::Child) {
     child.kill().await.ok();
     child.wait().await.ok();
 }
