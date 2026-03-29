@@ -5,46 +5,41 @@ extern crate log;
 use rand_core::OsRng;
 use reticulum::{
     destination::DestinationName,
+    hash::AddressHash,
     identity::PrivateIdentity,
     iface::tcp_client::TcpClient,
     transport::{Transport, TransportConfig},
 };
+use serde::{Deserialize, Serialize};
 use socks5_reticulum_proxy::ReticulumInstance;
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 use structopt::StructOpt;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::RwLock,
 };
-use serde::{Deserialize, Serialize};
 
 /// JSON mapping configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MappingConfig {
     pub aspects: String,
     pub forward_to: String,
+    pub address_hash: Option<String>,
 }
 
 pub type Mappings = HashMap<String, MappingConfig>;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "reverse-proxy", about = "A reverse proxy to bridge Reticulum to TCP/IP")]
+#[structopt(
+    name = "reverse-proxy",
+    about = "A reverse proxy to bridge Reticulum to TCP/IP"
+)]
 struct Opt {
     #[structopt(short = "i", long)]
     pub reticulum_identity_path: PathBuf,
     #[structopt(short = "c", long)]
     pub reticulum_connection: String,
-    #[structopt(short = "n", long)]
-    pub destination_name: String,
-    #[structopt(short = "a", long)]
-    pub destination_aspects: String,
     #[structopt(short = "m", long)]
     pub mappings_path: PathBuf,
 }
@@ -61,36 +56,64 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     let rns_identity = load_or_create_identity(&opt.reticulum_identity_path).await?;
     let rns_config = TransportConfig::new("reverse-proxy", &rns_identity, false);
     let mut rns_transport = Transport::new(rns_config);
-    
+
     let _client_addr = rns_transport.iface_manager().lock().await.spawn(
-        TcpClient::new(opt.reticulum_connection.as_str()), TcpClient::spawn,
+        TcpClient::new(opt.reticulum_connection.as_str()),
+        TcpClient::spawn,
     );
-    info!("Connected to Reticulum instance @ {}", opt.reticulum_connection);
+    info!(
+        "Connected to Reticulum instance @ {}",
+        opt.reticulum_connection
+    );
 
-    let mappings = load_mappings(&opt.mappings_path).await?;
-    let mappings = Arc::new(RwLock::new(mappings));
-    info!("Loaded {} destination mappings", mappings.read().await.len());
+    let mut mappings = load_mappings(&opt.mappings_path).await?;
+    info!("Loaded {} destination mappings", mappings.len());
 
-    let destination_name = DestinationName::new(&opt.destination_name, &opt.destination_aspects);
-    let destination = rns_transport.add_destination(rns_identity, destination_name).await;
-    let destination_hash = destination.lock().await.desc.address_hash;
-    info!("Listening for Reticulum connections @ {}", destination_hash);
+    for mapping in mappings.iter_mut() {
+        let destination_name = DestinationName::new(&mapping.0, &mapping.1.aspects);
+        let destination = rns_transport
+            .add_destination(rns_identity.clone(), destination_name)
+            .await;
+        let destination_hash = destination.lock().await.desc.address_hash;
+        mapping.1.address_hash = Some(destination_hash.to_hex_string());
+    }
 
     let rns_client = ReticulumInstance::new(rns_transport).await;
 
-    loop {
-        match rns_client.listen(destination_hash).await {
-            Some(stream) => {
-                let mappings = mappings.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, mappings).await {
-                        error!("Connection handler error: {}", e);
+    for mapping in mappings {
+        let destination_hash = mapping.1.address_hash.unwrap();
+        let target_addr: SocketAddr = mapping.1.forward_to.parse().map_err(|e| {
+            anyhow::anyhow!("Invalid forward address '{}': {}", mapping.1.forward_to, e)
+        })?;
+        let name = mapping.0.clone();
+        let rns_client = rns_client.clone();
+        tokio::spawn(async move {
+            info!(
+                "Listening for Reticulum connections @ {} for mapping {}",
+                destination_hash, mapping.0
+            );
+            loop {
+                match rns_client
+                    .listen(AddressHash::new_from_hex_string(destination_hash.as_str()).unwrap())
+                    .await
+                {
+                    Some(stream) => {
+                        let name = name.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, name, target_addr).await {
+                                error!("Connection handler error: {}", e);
+                            }
+                        });
                     }
-                });
+                    None => {
+                        error!("Reticulum listener ended");
+                        break;
+                    }
+                }
             }
-            None => { error!("Reticulum listener ended"); break; }
-        }
+        });
     }
+
     Ok(())
 }
 
@@ -113,7 +136,8 @@ async fn load_or_create_identity(path: &PathBuf) -> anyhow::Result<PrivateIdenti
 }
 
 async fn load_mappings(path: &PathBuf) -> anyhow::Result<Mappings> {
-    let content = tokio::fs::read_to_string(path).await
+    let content = tokio::fs::read_to_string(path)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to read mappings file {:?}: {}", path, e))?;
     let mappings: Mappings = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("Failed to parse mappings JSON: {}", e))?;
@@ -122,26 +146,19 @@ async fn load_mappings(path: &PathBuf) -> anyhow::Result<Mappings> {
 
 async fn handle_connection(
     mut stream: socks5_reticulum_proxy::ReticulumStream,
-    mappings: Arc<RwLock<Mappings>>,
+    name: String,
+    target_addr: SocketAddr,
 ) -> anyhow::Result<()> {
-    let (name, target_addr) = {
-        let mappings_guard = mappings.read().await;
-        if let Some((name, config)) = mappings_guard.iter().next() {
-            let target_addr: SocketAddr = config.forward_to.parse()
-                .map_err(|e| anyhow::anyhow!("Invalid forward address '{}': {}", config.forward_to, e))?;
-            (name.clone(), target_addr)
-        } else {
-            warn!("No mappings configured, dropping connection");
-            return Ok(());
-        }
-    };
-    
     info!("Forwarding connection for '{}' to {}", name, target_addr);
-    let mut target = TcpStream::connect(target_addr).await
+    let mut target = TcpStream::connect(target_addr)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to target {}: {}", target_addr, e))?;
-    
+
     match tokio::io::copy_bidirectional(&mut stream, &mut target).await {
-        Ok((a, b)) => info!("Connection closed for '{}': {} bytes sent, {} bytes received", name, a, b),
+        Ok((a, b)) => info!(
+            "Connection closed for '{}': {} bytes sent, {} bytes received",
+            name, a, b
+        ),
         Err(e) => error!("Connection error for '{}': {}", name, e),
     }
     Ok(())
