@@ -17,6 +17,7 @@ log = "0.4"
 fast-socks5 = "1.0"
 structopt = "0.3"
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 anyhow = "1"
 env_logger = "0.9"
 rand_core = { version = "0.6.4", features = ["getrandom"] }

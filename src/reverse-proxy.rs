@@ -19,6 +19,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+use tokio_util::sync::CancellationToken;
 
 /// JSON mapping configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -46,7 +47,9 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Debug)
+        .init();
     spawn_reverse_proxy().await
 }
 
@@ -80,6 +83,8 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
 
     let rns_client = ReticulumInstance::new(rns_transport).await;
 
+    let cancel = CancellationToken::new();
+
     for mapping in mappings {
         let destination_hash = mapping.1.address_hash.unwrap();
         let target_addr: SocketAddr = mapping.1.forward_to.parse().map_err(|e| {
@@ -87,6 +92,7 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
         })?;
         let name = mapping.0.clone();
         let rns_client = rns_client.clone();
+        let cancel = cancel.clone();
         tokio::spawn(async move {
             info!(
                 "Listening for Reticulum connections @ {} for mapping {}",
@@ -100,7 +106,9 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
                     Some(stream) => {
                         let name = name.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, name, target_addr).await {
+                            if let Err(e) =
+                                handle_connection(stream, name, target_addr).await
+                            {
                                 error!("Connection handler error: {}", e);
                             }
                         });
@@ -111,8 +119,10 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
                     }
                 }
             }
+            cancel.cancel();
         });
     }
+    cancel.cancelled().await;
 
     Ok(())
 }
@@ -155,11 +165,15 @@ async fn handle_connection(
         .map_err(|e| anyhow::anyhow!("Failed to connect to target {}: {}", target_addr, e))?;
 
     match tokio::io::copy_bidirectional(&mut stream, &mut target).await {
-        Ok((a, b)) => info!(
-            "Connection closed for '{}': {} bytes sent, {} bytes received",
-            name, a, b
-        ),
-        Err(e) => error!("Connection error for '{}': {}", name, e),
+        Ok((a, b)) => {
+            info!(
+                "Connection closed for '{}': {} bytes sent, {} bytes received",
+                name, a, b
+            );
+        }
+        Err(e) => {
+            error!("Connection error for '{}': {}", name, e);
+        }
     }
     Ok(())
 }
