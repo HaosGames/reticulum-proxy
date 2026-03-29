@@ -62,41 +62,19 @@ pub async fn stop_rnsd(mut child: Child) {
     child.wait().await.ok();
 }
 
-/// Start TCP echo server using pure Rust (no external dependency)
+/// Start TCP echo server using socat
 pub async fn start_tcp_echo_server(port: u16) -> Child {
-    use tokio::net::TcpListener;
-    
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await.unwrap();
-    
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((mut socket, _)) => {
-                    tokio::spawn(async move {
-                        let mut buf = vec![0u8; 1024];
-                        while let Ok(n) = socket.read(&mut buf).await {
-                            if n == 0 {
-                                break;
-                            }
-                            if socket.write_all(&buf[..n]).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    let port_str = port.to_string();
+    let child = tokio::process::Command::new("socat")
+        .arg(format!("TCP-LISTEN:{}", port_str))
+        .arg("SYSTEM:cat")
+        .spawn()
+        .expect("Failed to start socat");
     
     // Wait for server to start
-    sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(500)).await;
     
-    // Return a dummy Child for compatibility
-    tokio::process::Command::new("sleep")
-        .arg("999999")
-        .spawn()
-        .unwrap()
+    child
 }
 
 /// Stop TCP echo server

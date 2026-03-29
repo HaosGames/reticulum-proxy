@@ -74,8 +74,10 @@ async fn e2e_rnsd_start_stop() {
 
 #[tokio::test]
 async fn e2e_tcp_echo_server() {
-    // Test the TCP echo server
-    let echo = e2e::start_tcp_echo_server(e2e::TCP_ECHO_PORT).await;
+    // Test the TCP echo server (socat)
+    let echo = e2e::start_tcp_echo_server(e2e::TCP_ECHO_PORT)
+        .await
+        ;
     
     // Connect and send data
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -94,7 +96,7 @@ async fn e2e_tcp_echo_server() {
     // Cleanup
     e2e::stop_tcp_echo_server(echo).await;
     
-    println!("TCP echo server test passed!");
+    println!("TCP echo server (socat) test passed!");
 }
 
 #[tokio::test]
