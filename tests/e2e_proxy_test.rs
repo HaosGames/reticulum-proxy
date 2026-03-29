@@ -284,83 +284,96 @@ async fn reticululum_to_reverse_proxy_to_tcp() {
     info!("[Reverse Proxy→TCP] Test passed!");
 }
 
-/// Full end-to-end test: SOCKS5 Proxy → Reticulum → Reverse Proxy → TCP
+/// Full end-to-end test: Client → Proxy → Reticulum → Reverse Proxy → TCP
 ///
-/// This test validates the complete flow:
-/// 1. SOCKS5 Proxy accepts connections and routes .rns domains
-/// 2. Data flows through Reticulum network
-/// 3. Reverse Proxy receives and forwards to TCP target
-/// 4. TCP target responds back through the chain
+/// Network topology (3 transports, all connected):
+///
+/// ```
+///  [Client/Proxy]  ←TCP→  [Hub]  ←TCP→  [Reverse Proxy]
+///   transport_a             transport_hub   transport_b
+///   (proxy dest)                            (reverse dest)
+/// ```
+///
+/// Flow:
+/// 1. Client connects to Proxy destination (on transport_a)
+/// 2. Proxy reads data, connects to Reverse Proxy destination (on transport_b) via hub
+/// 3. Reverse Proxy forwards to local TCP echo server
+/// 4. Echo response flows back through the chain
 #[tokio::test]
 async fn full_e2e_proxy_reverse_proxy() {
     setup();
 
     // =====================================================================
-    // Setup Reticulum transports
+    // Setup Reticulum mesh: 3 transports connected via hub
     // =====================================================================
-    // Transport Proxy: runs the SOCKS5 proxy destination
-    let mut transport_proxy = build_transport("full_proxy", "127.0.0.1:9281", &[]).await;
-    // Transport Client: connects to proxy destination
-    let transport_client = build_transport("full_client", "127.0.0.1:9282", &["127.0.0.1:9281"]).await;
+    
+    // Hub connects both sides
+    let transport_hub = build_transport("hub", "127.0.0.1:9381", &[]).await;
+    
+    // Transport A: runs SOCKS5 proxy destination, connects to hub
+    let mut transport_a = build_transport("proxy_a", "127.0.0.1:9382", &["127.0.0.1:9381"]).await;
+    
+    // Transport B: runs reverse proxy destination, connects to hub
+    let mut transport_b = build_transport("reverse_b", "127.0.0.1:9383", &["127.0.0.1:9381"]).await;
 
-    // Transport Reverse: runs the reverse proxy destination
-    let mut transport_reverse = build_transport("full_reverse", "127.0.0.1:9283", &[]).await;
-    // Transport Server: connects to reverse destination
-    let transport_server = build_transport("full_server", "127.0.0.1:9284", &["127.0.0.1:9283"]).await;
+    // Wait for transports to connect
+    time::sleep(Duration::from_millis(500)).await;
 
-    // Create destinations
-    let id_proxy = PrivateIdentity::new_from_name("full_proxy");
-    let dest_proxy = transport_proxy
-        .add_destination(id_proxy, DestinationName::new("full_proxy", "socks5"))
+    // Create proxy destination on transport A
+    let id_proxy = PrivateIdentity::new_from_name("e2e_proxy");
+    let dest_proxy = transport_a
+        .add_destination(id_proxy, DestinationName::new("e2e_proxy", "socks5"))
         .await;
     let dest_proxy_hash = dest_proxy.lock().await.desc.address_hash;
 
-    let id_reverse = PrivateIdentity::new_from_name("full_reverse");
-    let dest_reverse = transport_reverse
-        .add_destination(id_reverse, DestinationName::new("full_reverse", "tcp"))
+    // Create reverse proxy destination on transport B
+    let id_reverse = PrivateIdentity::new_from_name("e2e_reverse");
+    let dest_reverse = transport_b
+        .add_destination(id_reverse, DestinationName::new("e2e_reverse", "tcp"))
         .await;
     let dest_reverse_hash = dest_reverse.lock().await.desc.address_hash;
 
-    // Announce and establish paths
-    transport_proxy.send_announce(&dest_proxy, None).await;
-    transport_client.recv_announces().await;
-    transport_client.request_path(&dest_proxy_hash, None, None).await;
+    // Announce both destinations
+    transport_a.send_announce(&dest_proxy, None).await;
+    transport_b.send_announce(&dest_reverse, None).await;
+    time::sleep(Duration::from_millis(500)).await;
 
-    transport_reverse.send_announce(&dest_reverse, None).await;
-    transport_server.recv_announces().await;
-    transport_server.request_path(&dest_reverse_hash, None, None).await;
+    // All transports should now know about both destinations
+    // Request paths from hub so announcements propagate
+    transport_hub.recv_announces().await;
+    transport_hub.request_path(&dest_proxy_hash, None, None).await;
+    transport_hub.request_path(&dest_reverse_hash, None, None).await;
     time::sleep(Duration::from_millis(500)).await;
 
     // Create Reticulum instances
-    let instance_proxy = ReticulumInstance::new(transport_proxy).await;
-    let instance_client = ReticulumInstance::new(transport_client).await;
-    let instance_reverse = ReticulumInstance::new(transport_reverse).await;
-    let instance_server = ReticulumInstance::new(transport_server).await;
+    let instance_a = ReticulumInstance::new(transport_a).await;
+    let instance_a_clone = instance_a.clone();
+    let instance_b = ReticulumInstance::new(transport_b).await;
+    let _instance_hub = ReticulumInstance::new(transport_hub).await;
 
     // =====================================================================
     // Setup TCP echo server (target behind reverse proxy)
     // =====================================================================
     let (server_stop_tx, server_stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server_addr = server.local_addr().unwrap();
+    let tcp_server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = tcp_server.local_addr().unwrap();
     info!("[Full E2E] Echo server on {}", server_addr);
 
     let server_handle = tokio::spawn(async move {
         let mut rx = server_stop_rx;
         loop {
             tokio::select! {
-                result = server.accept() => {
+                result = tcp_server.accept() => {
                     match result {
                         Ok((mut socket, _)) => {
                             let mut buffer = vec![0u8; 1024];
                             match socket.read(&mut buffer).await {
-                                Ok(n) => {
+                                Ok(n) if n > 0 => {
                                     let data = &buffer[..n];
-                                    info!("[Full E2E] TCP Server received: {:?}", String::from_utf8_lossy(data));
-                                    // Echo back
+                                    info!("[Full E2E] TCP echo: {:?}", String::from_utf8_lossy(data));
                                     let _ = socket.write_all(data).await;
                                 }
-                                Err(e) => log::error!("[Full E2E] TCP read error: {}", e),
+                                _ => {}
                             }
                         }
                         Err(e) => log::error!("[Full E2E] Accept error: {}", e),
@@ -372,127 +385,113 @@ async fn full_e2e_proxy_reverse_proxy() {
     });
 
     // =====================================================================
-    // Test flow:
-    // 1. SOCKS5 Proxy listens on proxy destination
-    // 2. Client connects to proxy destination
-    // 3. Proxy forwards to reverse proxy destination
-    // 4. Reverse proxy forwards to TCP server
-    // 5. TCP server echoes back
+    // Test actors
     // =====================================================================
-
     let test_message = "Full E2E test message!";
-    let response_received = std::sync::Arc::new(std::sync::Mutex::new(false));
-    let response_clone = response_received.clone();
+    let test_passed = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let test_passed_clone = test_passed.clone();
 
-    // Reverse proxy listener (listens on Reticulum, forwards to TCP)
-    let reverse_listener = tokio::spawn(async move {
-        if let Some(mut rns_stream) = instance_reverse.listen(dest_reverse_hash).await {
-            // Connect to TCP target
+    // Actor 1: Reverse proxy (transport B) - listens on Reticulum, forwards to TCP
+    let reverse_handle = tokio::spawn(async move {
+        info!("[Full E2E] Reverse proxy waiting for connection...");
+        if let Some(mut rns_stream) = instance_b.listen(dest_reverse_hash).await {
+            info!("[Full E2E] Reverse proxy got Reticulum connection");
             match TcpStream::connect(server_addr).await {
                 Ok(mut tcp_stream) => {
-                    info!("[Full E2E] Reverse proxy connected to TCP");
-                    // Read from Reticulum, forward to TCP
+                    // Forward: Reticulum → TCP
                     let mut buffer = vec![0u8; 1024];
                     if let Ok(n) = rns_stream.read(&mut buffer).await {
                         let data = &buffer[..n];
                         info!("[Full E2E] Reverse proxy forwarding {} bytes to TCP", n);
                         let _ = tcp_stream.write_all(data).await;
 
-                        // Read response from TCP, forward back to Reticulum
+                        // Forward response: TCP → Reticulum
                         let mut response = vec![0u8; 1024];
                         if let Ok(m) = tcp_stream.read(&mut response).await {
                             if m > 0 {
-                                info!("[Full E2E] Reverse proxy got response from TCP");
-                                rns_stream.write_all(&response[..m]).await.unwrap();
-                                *response_clone.lock().unwrap() = true;
+                                info!("[Full E2E] Reverse proxy returning {} bytes", m);
+                                let _ = rns_stream.write_all(&response[..m]).await;
                             }
                         }
                     }
                 }
-                Err(e) => log::error!("[Full E2E] TCP connect error: {}", e),
+                Err(e) => log::error!("[Full E2E] Reverse proxy TCP connect error: {}", e),
             }
         }
     });
 
-    // Clone instance_client for use in proxy_listener
-    let instance_client_for_proxy = instance_client.clone();
-    
-    // SOCKS5 Proxy listener (listens on Reticulum, forwards to reverse proxy destination)
-    let proxy_listener = tokio::spawn(async move {
-        if let Some(mut rns_stream) = instance_proxy.listen(dest_proxy_hash).await {
-            // Connect to reverse proxy destination
-            match instance_client_for_proxy.connect(dest_reverse_hash).await {
-                Ok(mut forward_stream) => {
-                    info!("[Full E2E] SOCKS5 proxy connected to reverse proxy");
-                    // Read from incoming, forward to reverse
+    // Actor 2: SOCKS5 Proxy (transport A) - listens for client, forwards to reverse proxy
+    let proxy_handle = tokio::spawn(async move {
+        info!("[Full E2E] Proxy waiting for client connection...");
+        if let Some(mut client_stream) = instance_a.listen(dest_proxy_hash).await {
+            info!("[Full E2E] Proxy got client connection, connecting to reverse proxy...");
+            // Connect to reverse proxy destination through the Reticulum mesh
+            match instance_a_clone.connect(dest_reverse_hash).await {
+                Ok(mut reverse_stream) => {
+                    info!("[Full E2E] Proxy connected to reverse proxy");
+                    // Forward: Client → Reverse Proxy
                     let mut buffer = vec![0u8; 1024];
-                    if let Ok(n) = rns_stream.read(&mut buffer).await {
+                    if let Ok(n) = client_stream.read(&mut buffer).await {
                         let data = &buffer[..n];
-                        info!("[Full E2E] SOCKS5 proxy forwarding {} bytes", n);
-                        let _ = forward_stream.write_all(data).await;
+                        info!("[Full E2E] Proxy forwarding {} bytes to reverse", n);
+                        let _ = reverse_stream.write_all(data).await;
 
-                        // Read response, forward back
+                        // Forward response: Reverse Proxy → Client
                         let mut response = vec![0u8; 1024];
-                        if let Ok(m) = forward_stream.read(&mut response).await {
+                        if let Ok(m) = reverse_stream.read(&mut response).await {
                             if m > 0 {
-                                info!("[Full E2E] SOCKS5 proxy got response from reverse");
-                                rns_stream.write_all(&response[..m]).await.unwrap();
+                                info!("[Full E2E] Proxy returning {} bytes to client", m);
+                                let _ = client_stream.write_all(&response[..m]).await;
                             }
                         }
                     }
                 }
-                Err(e) => log::error!("[Full E2E] Connect to reverse error: {}", e),
+                Err(e) => log::error!("[Full E2E] Proxy connect to reverse error: {}", e),
             }
         }
     });
 
-    // Client sender (simulates SOCKS5 client sending data)
-    let client_sender = tokio::spawn(async move {
-        time::sleep(Duration::from_millis(300)).await;
-        match instance_client.connect(dest_proxy_hash).await {
+    // Actor 3: Client (connects via hub to proxy destination on transport A)
+    let client_handle = tokio::spawn(async move {
+        // Give listeners time to start
+        time::sleep(Duration::from_millis(500)).await;
+        info!("[Full E2E] Client connecting to proxy...");
+        match _instance_hub.connect(dest_proxy_hash).await {
             Ok(mut stream) => {
-                info!("[Full E2E] Client connected to SOCKS5 proxy");
-                if let Err(e) = stream.write_all(test_message.as_bytes()).await {
-                    log::error!("[Full E2E] Client send error: {}", e);
-                    return;
-                }
-                info!("[Full E2E] Client sent: {}", test_message);
+                info!("[Full E2E] Client connected, sending: {}", test_message);
+                let _ = stream.write_all(test_message.as_bytes()).await;
 
-                // Wait for response
-                time::sleep(Duration::from_secs(2)).await;
+                // Wait for echo response
                 let mut buffer = vec![0u8; 1024];
-                match stream.read(&mut buffer).await {
-                    Ok(n) if n > 0 => {
-                        let response = String::from_utf8_lossy(&buffer[..n]);
-                        info!("[Full E2E] Client received response: {}", response);
-                        assert_eq!(
-                            response.trim(),
-                            test_message,
-                            "Expected echo back the test message"
-                        );
+                match time::timeout(Duration::from_secs(10), stream.read(&mut buffer)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        let response = String::from_utf8_lossy(&buffer[..n]).to_string();
+                        info!("[Full E2E] Client received: {}", response);
+                        assert_eq!(response, test_message, "Echo mismatch");
+                        *test_passed_clone.lock().unwrap() = true;
                     }
-                    Ok(_) => {
-                        log::warn!("[Full E2E] Client received empty response");
-                    }
-                    Err(e) => {
-                        log::error!("[Full E2E] Client read error: {}", e);
-                    }
+                    Ok(Ok(_)) => log::warn!("[Full E2E] Client: empty response"),
+                    Ok(Err(e)) => log::error!("[Full E2E] Client read error: {}", e),
+                    Err(_) => log::error!("[Full E2E] Client: timeout waiting for response"),
                 }
             }
             Err(e) => log::error!("[Full E2E] Client connect error: {}", e),
         }
     });
 
-    // Wait for all parts
-    tokio::join!(reverse_listener, proxy_listener, client_sender);
+    // Wait for all actors (with overall timeout)
+    let _ = time::timeout(Duration::from_secs(30), async {
+        tokio::join!(reverse_handle, proxy_handle, client_handle)
+    })
+    .await;
 
     // Cleanup
     let _ = server_stop_tx.send(());
     let _ = server_handle.await;
 
     assert!(
-        *response_received.lock().unwrap(),
-        "Expected response to be received"
+        *test_passed.lock().unwrap(),
+        "E2E test did not complete successfully"
     );
     info!("[Full E2E] Test passed!");
 }
