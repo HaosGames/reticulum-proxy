@@ -9,18 +9,14 @@ use fast_socks5::{
 };
 use rand_core::OsRng;
 use reticulum::{
-    destination::{
-        self, DestinationDesc, DestinationName, SingleInputDestination,
-        link::{self, Link, LinkEvent, LinkId},
-    },
     hash::AddressHash,
-    identity::{Identity, PrivateIdentity},
+    identity::PrivateIdentity,
     iface::tcp_client::TcpClient,
-    transport::{self, Transport, TransportConfig},
+    transport::{Transport, TransportConfig},
 };
 use socks5_reticulum_proxy::ReticulumInstance;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
@@ -29,15 +25,7 @@ use std::{
     },
 };
 use structopt::StructOpt;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::TcpListener,
-    sync::{
-        Mutex, RwLock,
-        mpsc::{Receiver, Sender, channel},
-    },
-    task,
-};
+use tokio::{net::TcpListener, sync::RwLock, task};
 
 /// # How to use it:
 ///
@@ -105,6 +93,7 @@ async fn spawn_socks_server() -> Result<()> {
     let rns_identitiy = PrivateIdentity::new_from_rand(OsRng);
     let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, false);
     let rns_transport = Transport::new(rns_config);
+    let _announce_receiver = rns_transport.recv_announces().await;
     let _client_addr = rns_transport.iface_manager().lock().await.spawn(
         TcpClient::new(opt.reticulum_addr.as_str()),
         TcpClient::spawn,
@@ -218,4 +207,3 @@ where
         }
     })
 }
-

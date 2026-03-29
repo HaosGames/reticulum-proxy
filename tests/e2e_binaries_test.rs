@@ -16,11 +16,11 @@ fn test_dir() -> PathBuf {
 }
 
 fn proxy_binary() -> PathBuf {
-    PathBuf::from("/home/openclaw/.openclaw/workspace/reticulum-proxy/target/debug/proxy")
+    PathBuf::from("/home/thorstenschindler/repos/haosgames/socks5-reticulum-proxy/target/debug/proxy")
 }
 
 fn reverse_proxy_binary() -> PathBuf {
-    PathBuf::from("/home/openclaw/.openclaw/workspace/reticulum-proxy/target/debug/reverse-proxy")
+    PathBuf::from("/home/thorstenschindler/repos/haosgames/socks5-reticulum-proxy/target/debug/reverse-proxy")
 }
 
 fn create_identity(path: &PathBuf, name: &str) {
@@ -179,7 +179,7 @@ async fn e2e_full_flow() {
     
     // Send request through SOCKS5 using .rns domain with hash
     // Format: service_name.destination_hash.rns
-    let target = format!("test_service.{}.rns", hash);
+    let target = format!("{}.rns", hash);
     println!("Connecting to: {}", target);
     
     let result = e2e::send_raw_via_socks5(

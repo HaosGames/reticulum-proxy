@@ -44,7 +44,7 @@ enabled = yes
     std::fs::write(&config_file, config_content).ok();
     
     // Use the venv Python with rns
-    let rnsd_path = "/tmp/rns-venv/bin/rnsd";
+    let rnsd_path = "/home/thorstenschindler/reticulum/bin/rnsd";
     
     let child = tokio::process::Command::new(rnsd_path)
         .args(["--config", config_dir.to_str().unwrap()])

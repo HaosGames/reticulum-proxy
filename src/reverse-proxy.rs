@@ -77,6 +77,7 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
         let destination = rns_transport
             .add_destination(rns_identity.clone(), destination_name)
             .await;
+        rns_transport.send_announce(&destination, None).await;
         let destination_hash = destination.lock().await.desc.address_hash;
         let hash_str = destination_hash.to_hex_string();
         mapping.1.address_hash = Some(hash_str.clone());
