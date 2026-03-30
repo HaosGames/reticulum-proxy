@@ -5,7 +5,6 @@ mod e2e;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 
@@ -16,15 +15,20 @@ fn test_dir() -> PathBuf {
 }
 
 fn proxy_binary() -> PathBuf {
-    PathBuf::from("/home/thorstenschindler/repos/haosgames/socks5-reticulum-proxy/target/debug/proxy")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("debug")
+        .join("proxy")
 }
 
 fn reverse_proxy_binary() -> PathBuf {
-    PathBuf::from("/home/thorstenschindler/repos/haosgames/socks5-reticulum-proxy/target/debug/reverse-proxy")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("debug")
+        .join("reverse-proxy")
 }
 
 fn create_identity(path: &PathBuf, name: &str) {
-    use rand_core::OsRng;
     let identity = reticulum::identity::PrivateIdentity::new_from_name(name);
     let hex = identity.to_hex_string();
     std::fs::create_dir_all(path.parent().unwrap()).ok();

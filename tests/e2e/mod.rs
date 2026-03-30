@@ -8,14 +8,12 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::process::Child;
 use tokio::time::sleep;
 
 /// Port constants for E2E tests
 pub const RNS_PORT: u16 = 4711;
 pub const SOCKS5_PORT: u16 = 1080;
 pub const TCP_ECHO_PORT: u16 = 9000;
-pub const RNS_HOST: &str = "127.0.0.1";
 
 /// RNS Config path for tests
 pub fn rns_config_path() -> PathBuf {
@@ -43,8 +41,9 @@ enabled = yes
     let config_file = config_dir.join("config");
     std::fs::write(&config_file, config_content).ok();
     
-    // Use the venv Python with rns
-    let rnsd_path = "/home/thorstenschindler/reticulum/bin/rnsd";
+    // Use rnsd from PATH or venv
+    let rnsd_path = std::env::var("RNSD_PATH")
+        .unwrap_or_else(|_| "rnsd".to_string());
     
     let child = tokio::process::Command::new(rnsd_path)
         .args(["--config", config_dir.to_str().unwrap()])
@@ -84,6 +83,7 @@ pub async fn stop_tcp_echo_server(mut child: tokio::process::Child) {
 }
 
 /// Send HTTP request through SOCKS5 proxy and return response code
+#[allow(dead_code)]
 pub async fn send_http_via_socks5(
     socks5_host: &str,
     socks5_port: u16,
