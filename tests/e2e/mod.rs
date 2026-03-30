@@ -28,6 +28,7 @@ pub async fn start_rnsd() -> std::io::Result<tokio::process::Child> {
     // Create Reticulum config - shared instance for test
     let config_content = r#"
 [reticulum]
+enable_transport = yes
 shared_instance = yes
 instance_control_port = 4712
 
