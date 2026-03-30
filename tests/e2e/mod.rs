@@ -34,7 +34,7 @@ shared_instance = yes
 instance_control_port = 4712
 
 [[Default Interface]]
-type = TCPInterface
+type = TCPServerInterface
 listen_ip = 127.0.0.1
 listen_port = 4711
 enabled = yes

@@ -1,35 +1,11 @@
 #[forbid(unsafe_code)]
 #[macro_use]
 extern crate log;
-use rand_core::OsRng;
-use reticulum::{
-    destination::{
-        self, DestinationDesc, DestinationName, SingleInputDestination,
-        link::{self, Link, LinkEvent, LinkId},
-    },
-    hash::AddressHash,
-    identity::{Identity, PrivateIdentity},
-    iface::tcp_client::TcpClient,
-    transport::{self, Transport, TransportConfig},
-};
-use std::{
-    collections::{BTreeMap, HashSet},
-    future::Future,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
-use structopt::StructOpt;
+use reticulum::{destination::link::LinkEvent, hash::AddressHash, transport::Transport};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpListener,
-    sync::{
-        Mutex, RwLock,
-        mpsc::{Receiver, Sender, channel},
-    },
-    task,
+    sync::{Mutex, mpsc::{Receiver, Sender, channel}},
 };
 #[derive(Clone)]
 pub struct ReticulumInstance {
