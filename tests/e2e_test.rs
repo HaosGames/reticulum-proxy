@@ -1,11 +1,7 @@
 //! End-to-end tests for SOCKS5 Proxy and Reverse Proxy binaries
 //!
 //! These tests start the actual binaries and validate them against
-//! an external Reticulum instance (rnsd).
-//!
-//! Prerequisites:
-//! - Python Reticulum (`rns`) installed in `/tmp/rns-venv`
-//! - Binaries built: `cargo build --release`
+//! a custom Rust Reticulum hub.
 
 mod e2e;
 
@@ -38,38 +34,29 @@ fn reverse_proxy_binary() -> PathBuf {
 
 #[tokio::test]
 async fn e2e_prerequisites() {
-    // Check rnsd
-    let rnsd = tokio::process::Command::new("/tmp/rns-venv/bin/rnsd")
-        .arg("--help")
-        .output()
-        .await;
-    assert!(rnsd.is_ok(), "rnsd should be installed in /tmp/rns-venv");
-    
     // Check binaries exist
     assert!(proxy_binary().exists(), "proxy binary should be built with: cargo build --release");
     assert!(reverse_proxy_binary().exists(), "reverse-proxy binary should be built");
     
     println!("All E2E prerequisites verified!");
-    println!("  - rnsd: OK");
     println!("  - proxy binary: {}", proxy_binary().display());
     println!("  - reverse-proxy binary: {}", reverse_proxy_binary().display());
 }
 
 #[tokio::test]
-async fn e2e_rnsd_start_stop() {
-    // Test starting and stopping rnsd
-    let rnsd = e2e::start_rnsd().await;
-    assert!(rnsd.is_ok(), "Should be able to start rnsd");
-    
-    let rnsd = rnsd.unwrap();
+async fn e2e_hub_starts() {
+    // Test starting the Rust hub
+    let _hub = e2e::start_hub().await;
     
     // Let it run briefly
     sleep(Duration::from_secs(1)).await;
     
-    // Stop it
-    e2e::stop_rnsd(rnsd).await;
+    // Verify port is listening
+    use tokio::net::TcpStream;
+    let connected = TcpStream::connect("127.0.0.1:4711").await;
+    assert!(connected.is_ok(), "Should connect to hub on port 4711");
     
-    println!("rnsd start/stop test passed!");
+    println!("Hub start test passed!");
 }
 
 #[tokio::test]
@@ -153,9 +140,9 @@ async fn e2e_full_integration() {
     // Full E2E test combining all components
     // This is the main test that would validate the complete flow
     
-    // 1. Start rnsd
-    let rnsd = e2e::start_rnsd().await.expect("Should start rnsd");
-    sleep(Duration::from_secs(1)).await;
+    // 1. Start Rust hub
+    let _hub = e2e::start_hub().await;
+    sleep(Duration::from_millis(500)).await;
     
     // 2. Start TCP echo server (simulates service behind reverse proxy)
     let echo = e2e::start_tcp_echo_server(e2e::TCP_ECHO_PORT).await;
@@ -164,14 +151,18 @@ async fn e2e_full_integration() {
     // Full binary tests require more setup (identity files, etc.)
     
     println!("E2E infrastructure ready:");
-    println!("  - rnsd running on port {}", e2e::RNS_PORT);
+    println!("  - Rust hub running on port {}", e2e::RNS_PORT);
     println!("  - TCP echo server on port {}", e2e::TCP_ECHO_PORT);
     println!("  - SOCKS5 proxy would listen on port {}", e2e::SOCKS5_PORT);
     println!("  - Reverse proxy would connect to RNS and forward to TCP");
     
+    // Verify hub is reachable
+    use tokio::net::TcpStream;
+    let connected = TcpStream::connect("127.0.0.1:4711").await;
+    assert!(connected.is_ok(), "Should connect to hub");
+    
     // Cleanup
     e2e::stop_tcp_echo_server(echo).await;
-    e2e::stop_rnsd(rnsd).await;
     
     println!("Full E2E integration test passed!");
 }

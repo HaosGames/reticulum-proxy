@@ -62,8 +62,9 @@ async fn e2e_proxy_starts() {
     let proxy_identity = test_dir.join("proxy_identity.hex");
     create_identity(&proxy_identity, "e2e_proxy");
     
-    let rnsd = e2e::start_rnsd().await.expect("Should start rnsd");
-    sleep(Duration::from_secs(2)).await;
+    // Start Rust hub instead of rnsd
+    let _hub = e2e::start_hub().await;
+    sleep(Duration::from_millis(500)).await;
     
     let mut proxy = tokio::process::Command::new(proxy_binary())
         .args(["-l", &format!("127.0.0.1:{}", SOCKS5_PORT), "-r", "127.0.0.1:4711", "no-auth"])
@@ -77,7 +78,6 @@ async fn e2e_proxy_starts() {
     println!("Proxy connection: {:?}", connected);
     
     proxy.kill().await.ok();
-    e2e::stop_rnsd(rnsd).await;
     std::fs::remove_dir_all(&test_dir).ok();
     
     assert!(connected.is_ok(), "Should connect to SOCKS5 proxy");
@@ -95,8 +95,9 @@ async fn e2e_reverse_proxy_starts() {
     let mappings = test_dir.join("mappings.json");
     create_mappings(&mappings, TCP_ECHO_PORT);
     
-    let rnsd = e2e::start_rnsd().await.expect("Should start rnsd");
-    sleep(Duration::from_secs(2)).await;
+    // Start Rust hub instead of rnsd
+    let _hub = e2e::start_hub().await;
+    sleep(Duration::from_millis(500)).await;
     
     let mut reverse = tokio::process::Command::new(reverse_proxy_binary())
         .args([
@@ -113,7 +114,6 @@ async fn e2e_reverse_proxy_starts() {
     println!("Reverse-proxy started");
     
     reverse.kill().await.ok();
-    e2e::stop_rnsd(rnsd).await;
     std::fs::remove_dir_all(&test_dir).ok();
 }
 
@@ -149,11 +149,22 @@ async fn e2e_full_flow() {
     // Clean up hash file from previous runs
     std::fs::remove_file("/tmp/reticulum-reverse-hash").ok();
     
-    let rnsd = e2e::start_rnsd().await.expect("Should start rnsd");
-    sleep(Duration::from_secs(2)).await;
+    // Start Rust hub instead of rnsd
+    let mut hub = e2e::start_hub().await;
+    sleep(Duration::from_millis(500)).await;
     
     let echo = e2e::start_tcp_echo_server(TCP_ECHO_PORT).await;
     
+    // Start PROXY first this time
+    let mut proxy = tokio::process::Command::new(proxy_binary())
+        .args(["-l", &format!("127.0.0.1:{}", SOCKS5_PORT), "-r", "127.0.0.1:4711", "no-auth"])
+        .env("RUST_LOG", "info")
+        .spawn()
+        .expect("Should start proxy");
+    
+    sleep(Duration::from_secs(2)).await;
+    
+    // Then start reverse-proxy (so proxy is already connected when it announces)
     let mut reverse = tokio::process::Command::new(reverse_proxy_binary())
         .args([
             "-i", reverse_identity.to_str().unwrap(),
@@ -164,22 +175,20 @@ async fn e2e_full_flow() {
         .spawn()
         .expect("Should start reverse-proxy");
     
-    sleep(Duration::from_secs(2)).await;
-    
-    let mut proxy = tokio::process::Command::new(proxy_binary())
-        .args(["-l", &format!("127.0.0.1:{}", SOCKS5_PORT), "-r", "127.0.0.1:4711", "no-auth"])
-        .env("RUST_LOG", "info")
-        .spawn()
-        .expect("Should start proxy");
-    
-    sleep(Duration::from_secs(2)).await;
-    
-    // Give proxy time to connect and initialize
     sleep(Duration::from_secs(3)).await;
+    
+    // Process any pending announcements on the hub
+    hub.recv_announces().await;
+    
+    // Extra time for announcements to propagate
+    sleep(Duration::from_secs(2)).await;
     
     // Get the hash from reverse-proxy
     let hash = get_reverse_hash().await;
     println!("Reverse proxy hash: {}", hash);
+    
+    // More time for proxy to receive and process the announcement
+    sleep(Duration::from_secs(2)).await;
     
     // Send request through SOCKS5 using .rns domain with hash
     // Format: service_name.destination_hash.rns
@@ -198,7 +207,6 @@ async fn e2e_full_flow() {
     proxy.kill().await.ok();
     reverse.kill().await.ok();
     e2e::stop_tcp_echo_server(echo).await;
-    e2e::stop_rnsd(rnsd).await;
     std::fs::remove_dir_all(&test_dir).ok();
     
     // Verify we got a response (even if empty, the connection worked)

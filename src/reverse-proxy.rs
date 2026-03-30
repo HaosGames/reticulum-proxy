@@ -57,7 +57,7 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     let opt: &'static Opt = Box::leak(Box::new(Opt::from_args()));
 
     let rns_identity = load_or_create_identity(&opt.reticulum_identity_path).await?;
-    let rns_config = TransportConfig::new("reverse-proxy", &rns_identity, false);
+    let rns_config = TransportConfig::new("reverse-proxy", &rns_identity, true); // enable_transport = true
     let mut rns_transport = Transport::new(rns_config);
 
     let _client_addr = rns_transport.iface_manager().lock().await.spawn(

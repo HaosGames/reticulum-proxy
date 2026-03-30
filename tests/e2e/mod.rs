@@ -1,67 +1,54 @@
-//! E2E Test Harness for SOCKS5 Proxy and Reverse Proxy
+//! E2E Test Harness for SOCKS5 Proxy and Reverse Proxy binaries
 //!
-//! This module provides utilities for end-to-end testing of the proxy binaries
-//! using an external Reticulum instance (rnsd).
+//! Uses a custom Rust hub instead of rnsd for reliable packet routing.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use rand_core::OsRng;
+use reticulum::{
+    destination::DestinationName,
+    identity::PrivateIdentity,
+    iface::tcp_server::TcpServer,
+    transport::{Transport, TransportConfig},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 
 /// Port constants for E2E tests
+#[allow(dead_code)]
 pub const RNS_PORT: u16 = 4711;
 pub const SOCKS5_PORT: u16 = 1080;
 pub const TCP_ECHO_PORT: u16 = 9000;
 
 /// RNS Config path for tests
+#[allow(dead_code)]
 pub fn rns_config_path() -> PathBuf {
     PathBuf::from("/tmp/reticulum_e2e_test")
 }
 
-/// Start rnsd (Reticulum daemon) as a subprocess
-pub async fn start_rnsd() -> std::io::Result<tokio::process::Child> {
-    let config_dir = rns_config_path();
-    std::fs::create_dir_all(&config_dir).ok();
+/// Start a Rust-based hub that routes packets between connected clients
+pub async fn start_hub() -> Transport {
+    let identity = PrivateIdentity::new_from_name("hub");
+    let config = TransportConfig::new("hub", &identity, true); // enable_transport = true
+    let mut transport = Transport::new(config);
     
-    // Create Reticulum config - shared instance for test
-    let config_content = r#"
-[reticulum]
-enable_transport = yes
-shared_instance = yes
-instance_control_port = 4712
-
-[interfaces]
-
-  [[TCP Server Interface]]
-    type = TCPServerInterface
-    enabled = yes
-    listen_ip = 127.0.0.1
-    listen_port = 4711
-"#;
+    // Create a dummy destination so the hub is a proper Reticulum node
+    // This helps with announcement propagation
+    let dummy_id = PrivateIdentity::new_from_name("hub_dummy");
+    let _dest = transport.add_destination(dummy_id, reticulum::destination::DestinationName::new("hub", "tcp")).await;
     
-    let config_file = config_dir.join("config");
-    std::fs::write(&config_file, config_content).ok();
+    // Spawn TCP server interface
+    transport.iface_manager().lock().await.spawn(
+        TcpServer::new("127.0.0.1:4711", transport.iface_manager()),
+        TcpServer::spawn,
+    );
     
-    // Use rnsd from PATH or venv
-    let rnsd_path = std::env::var("RNSD_PATH")
-        .unwrap_or_else(|_| "rnsd".to_string());
+    // Wait for server to start
+    sleep(Duration::from_millis(500)).await;
     
-    let child = tokio::process::Command::new(rnsd_path)
-        .args(["--config", config_dir.to_str().unwrap()])
-        .spawn()?;
-    
-    // Wait for rnsd to start
-    sleep(Duration::from_secs(2)).await;
-    
-    Ok(child)
-}
-
-/// Stop rnsd subprocess
-pub async fn stop_rnsd(mut child: tokio::process::Child) {
-    child.kill().await.ok();
-    child.wait().await.ok();
+    transport
 }
 
 /// Start TCP echo server using socat

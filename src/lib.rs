@@ -19,10 +19,33 @@ pub struct ReticulumStream {
 
 impl ReticulumInstance {
     pub async fn new(transport: Transport) -> Self {
-        Self {
+        let instance = Self {
             transport: Arc::new(Mutex::new(transport)),
-        }
+        };
+        
+        // Spawn background task to continuously receive announcements
+        let transport_clone = instance.transport.clone();
+        tokio::spawn(async move {
+            let mut receiver = transport_clone.lock().await.recv_announces().await;
+            loop {
+                match receiver.recv().await {
+                    Ok(_ann) => {
+                        log::info!("Received announcement");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        log::debug!("Announcement receiver closed");
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("Announcement receiver lagged by {} messages", n);
+                    }
+                }
+            }
+        });
+        
+        instance
     }
+    
     pub async fn listen(&self, destination: AddressHash) -> Option<ReticulumStream> {
         // wait for new incoming link for destination and extract link_id
         let mut receiver = self.transport.lock().await.in_link_events();
