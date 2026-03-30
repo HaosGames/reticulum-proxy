@@ -31,11 +31,13 @@ pub async fn start_rnsd() -> std::io::Result<tokio::process::Child> {
 shared_instance = yes
 instance_control_port = 4712
 
-[[Default Interface]]
-type = TCPServerInterface
-listen_ip = 127.0.0.1
-listen_port = 4711
-enabled = yes
+[interfaces]
+
+  [[TCP Server Interface]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_ip = 127.0.0.1
+    listen_port = 4711
 "#;
     
     let config_file = config_dir.join("config");
