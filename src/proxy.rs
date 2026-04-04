@@ -9,7 +9,6 @@ use fast_socks5::{
 };
 use rand_core::OsRng;
 use reticulum::{
-    destination::DestinationName,
     hash::AddressHash,
     identity::PrivateIdentity,
     iface::tcp_client::TcpClient,
@@ -24,7 +23,6 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 use structopt::StructOpt;
 use tokio::{net::TcpListener, sync::RwLock, task};

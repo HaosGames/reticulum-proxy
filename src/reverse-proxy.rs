@@ -4,7 +4,7 @@ extern crate log;
 
 use rand_core::OsRng;
 use reticulum::{
-    destination::{self, DestinationName, SingleInputDestination},
+    destination::{DestinationName},
     hash::AddressHash,
     identity::PrivateIdentity,
     iface::tcp_client::TcpClient,
@@ -12,7 +12,7 @@ use reticulum::{
 };
 use serde::{Deserialize, Serialize};
 use socks5_reticulum_proxy::ReticulumInstance;
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 use structopt::StructOpt;
 use tokio::{
     fs::File,
