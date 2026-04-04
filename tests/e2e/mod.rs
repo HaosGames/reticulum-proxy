@@ -5,10 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use log::info;
-use rand_core::OsRng;
 use reticulum::{
-    destination::DestinationName,
     identity::PrivateIdentity,
     iface::tcp_server::TcpServer,
     transport::{Transport, TransportConfig},

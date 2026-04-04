@@ -109,7 +109,11 @@ async fn simple_connect_listen() {
         }
     });
 
-    let _ = time::timeout(Duration::from_secs(10), async { tokio::join!(h, h2); }).await;
+    let _ = time::timeout(Duration::from_secs(10), async { 
+        let (r1, r2) = tokio::join!(h, h2); 
+        r1.unwrap();
+        r2.unwrap();
+    }).await;
 
     let data = got.lock().unwrap();
     assert!(!data.is_empty(), "No data received");

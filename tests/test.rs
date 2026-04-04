@@ -102,7 +102,7 @@ async fn send_receive_reverse() {
     setup();
 
     let mut transport_a = build_transport("a", "127.0.0.1:8181", &[]).await;
-    let transport_b = build_transport("b", "127.0.0.1:8182", &["127.0.0.1:8181"]).await;
+    let _transport_b = build_transport("b", "127.0.0.1:8182", &["127.0.0.1:8181"]).await;
     let transport_c = build_transport("c", "127.0.0.1:8183", &["127.0.0.1:8182"]).await;
     let id_a = PrivateIdentity::new_from_name("a");
     let dest_a = transport_a
