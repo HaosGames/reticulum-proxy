@@ -31,7 +31,8 @@ pub fn rns_config_path() -> PathBuf {
 /// Start a Rust-based hub that routes packets between connected clients
 pub async fn start_hub() -> Transport {
     let identity = PrivateIdentity::new_from_name("hub");
-    let config = TransportConfig::new("hub", &identity, true); // enable_transport = true
+    let mut config = TransportConfig::new("hub", &identity, true); // enable_transport = true
+    config.set_retransmit(true);
     let mut transport = Transport::new(config);
     
     // Create a dummy destination so the hub is a proper Reticulum node
