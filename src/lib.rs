@@ -98,8 +98,13 @@ impl ReticulumInstance {
                         if let LinkEvent::Data(payload) = event.event {
                             trace!("received {} bytes over link: {}", payload.len(), link_id);
                             let data = payload.as_slice().iter().cloned().collect();
-                            if let Err(_error) = received_sender.send(data).await {
+                            if let Err(error) = received_sender.send(data).await {
+                                let bytes = error.0;
                                 warn!("received_sender ended while trying to send from reticlulum to stream")
+                                // TODO we need to try to re-initiate the connection to the mapped destination
+                                // so that these bytes can be delivered even if that connection ended. 
+                                // For that we may need to eliminate the channel in between 
+                                // the ReticulumStream and the TcpStream.
                             }
                         }
                     } else {
