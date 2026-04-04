@@ -9,35 +9,25 @@ use fast_socks5::{
 };
 use rand_core::OsRng;
 use reticulum::{
-    destination::{
-        self, DestinationDesc, DestinationName, SingleInputDestination,
-        link::{self, Link, LinkEvent, LinkId},
-    },
+    destination::DestinationName,
     hash::AddressHash,
-    identity::{Identity, PrivateIdentity},
+    identity::PrivateIdentity,
     iface::tcp_client::TcpClient,
-    transport::{self, Transport, TransportConfig},
+    transport::{Transport, TransportConfig},
 };
 use socks5_reticulum_proxy::ReticulumInstance;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 use structopt::StructOpt;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::TcpListener,
-    sync::{
-        Mutex, RwLock,
-        mpsc::{Receiver, Sender, channel},
-    },
-    task,
-};
+use tokio::{net::TcpListener, sync::RwLock, task};
 
 /// # How to use it:
 ///
@@ -103,13 +93,26 @@ async fn spawn_socks_server() -> Result<()> {
     let backends = Arc::new(RwLock::new(HashSet::new()));
 
     let rns_identitiy = PrivateIdentity::new_from_rand(OsRng);
-    let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, false);
-    let rns_transport = Transport::new(rns_config);
+    let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, true); // enable_transport = true
+    let mut rns_transport = Transport::new(rns_config);
+    
+    // Create a dummy destination so the proxy is a proper Reticulum node
+    // This helps with announcement propagation
+    let proxy_dest = rns_transport.add_destination(
+        rns_identitiy.clone(),
+        reticulum::destination::DestinationName::new("socks5-proxy", "tcp"),
+    ).await;
+    
     let _client_addr = rns_transport.iface_manager().lock().await.spawn(
         TcpClient::new(opt.reticulum_addr.as_str()),
         TcpClient::spawn,
     );
     info!("Connected to Reticulum Instance @ {}", opt.reticulum_addr);
+    
+    // Announce our presence and receive announcements from others
+    rns_transport.send_announce(&proxy_dest, None).await;
+    rns_transport.recv_announces().await;
+    
     let rns_client = ReticulumInstance::new(rns_transport).await;
 
     let listener = TcpListener::bind(&opt.listen_addr).await?;
@@ -218,4 +221,3 @@ where
         }
     })
 }
-

@@ -1222,8 +1222,11 @@ dependencies = [
  "log",
  "rand_core",
  "reticulum",
+ "serde",
+ "serde_json",
  "structopt",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

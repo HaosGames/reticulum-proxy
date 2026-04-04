@@ -62,19 +62,20 @@ async fn send_receive() {
     setup();
 
     let mut transport_a = build_transport("a", "127.0.0.1:8081", &[]).await;
-    let transport_b = build_transport("b", "127.0.0.1:8082", &["127.0.0.1:8081"]).await;
+    let _transport_b = build_transport("b", "127.0.0.1:8082", &["127.0.0.1:8081"]).await;
+    let transport_c = build_transport("c", "127.0.0.1:8083", &["127.0.0.1:8082"]).await;
     let id_a = PrivateIdentity::new_from_name("a");
     let dest_a = transport_a
         .add_destination(id_a, DestinationName::new("test", "hop"))
         .await;
     let dest_a_hash = dest_a.lock().await.desc.address_hash;
     transport_a.send_announce(&dest_a, None).await;
-    transport_b.recv_announces().await;
-    transport_b.request_path(&dest_a_hash, None, None).await;
+    transport_c.recv_announces().await;
+    transport_c.request_path(&dest_a_hash, None, None).await;
     time::sleep(Duration::from_secs(1)).await;
 
     let instance_a = ReticulumInstance::new(transport_a).await;
-    let instance_b = ReticulumInstance::new(transport_b).await;
+    let instance_c = ReticulumInstance::new(transport_c).await;
 
     let message = "foo";
     let receive_loop = tokio::spawn(async move {
@@ -89,7 +90,7 @@ async fn send_receive() {
         }
     });
     let send_loop = tokio::spawn(async move {
-        let mut stream = instance_b.connect(dest_a_hash).await.unwrap();
+        let mut stream = instance_c.connect(dest_a_hash).await.unwrap();
         stream.write(message.as_bytes()).await.unwrap();
     });
     receive_loop.await.unwrap();
@@ -102,18 +103,19 @@ async fn send_receive_reverse() {
 
     let mut transport_a = build_transport("a", "127.0.0.1:8181", &[]).await;
     let transport_b = build_transport("b", "127.0.0.1:8182", &["127.0.0.1:8181"]).await;
+    let transport_c = build_transport("c", "127.0.0.1:8183", &["127.0.0.1:8182"]).await;
     let id_a = PrivateIdentity::new_from_name("a");
     let dest_a = transport_a
         .add_destination(id_a, DestinationName::new("test", "hop"))
         .await;
     let dest_a_hash = dest_a.lock().await.desc.address_hash;
     transport_a.send_announce(&dest_a, None).await;
-    transport_b.recv_announces().await;
-    transport_b.request_path(&dest_a_hash, None, None).await;
+    transport_c.recv_announces().await;
+    transport_c.request_path(&dest_a_hash, None, None).await;
     time::sleep(Duration::from_secs(1)).await;
 
     let instance_a = ReticulumInstance::new(transport_a).await;
-    let instance_b = ReticulumInstance::new(transport_b).await;
+    let instance_c = ReticulumInstance::new(transport_c).await;
 
     let message = "foo";
     let listen_handle = tokio::spawn(async move {
@@ -125,7 +127,7 @@ async fn send_receive_reverse() {
         }
     });
     let connect_handle = tokio::spawn(async move {
-        let mut stream = instance_b.connect(dest_a_hash).await.unwrap();
+        let mut stream = instance_c.connect(dest_a_hash).await.unwrap();
         loop {
             time::sleep(Duration::from_secs(1)).await;
             let mut buffer = BytesMut::with_capacity(3);

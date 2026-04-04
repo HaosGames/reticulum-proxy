@@ -3,15 +3,26 @@ name = "socks5-reticulum-proxy"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "proxy"
+path = "src/proxy.rs"
+
+[[bin]]
+name = "reverse-proxy"
+path = "src/reverse-proxy.rs"
+
 [dependencies]
 bytes = "1.11"
 log = "0.4"
 fast-socks5 = "1.0"
 structopt = "0.3"
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 anyhow = "1"
 env_logger = "0.11"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde_json = "1"
+serde = "1"
 
 [dependencies.reticulum]
 git = "https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs"

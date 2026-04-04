@@ -1,35 +1,11 @@
 #[forbid(unsafe_code)]
 #[macro_use]
 extern crate log;
-use rand_core::OsRng;
-use reticulum::{
-    destination::{
-        self, DestinationDesc, DestinationName, SingleInputDestination,
-        link::{self, Link, LinkEvent, LinkId},
-    },
-    hash::AddressHash,
-    identity::{Identity, PrivateIdentity},
-    iface::tcp_client::TcpClient,
-    transport::{self, Transport, TransportConfig},
-};
-use std::{
-    collections::{BTreeMap, HashSet},
-    future::Future,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
-use structopt::StructOpt;
+use reticulum::{destination::link::LinkEvent, hash::AddressHash, transport::Transport};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpListener,
-    sync::{
-        Mutex, RwLock,
-        mpsc::{Receiver, Sender, channel},
-    },
-    task,
+    sync::{Mutex, mpsc::{Receiver, Sender, channel}},
 };
 #[derive(Clone)]
 pub struct ReticulumInstance {
@@ -43,10 +19,33 @@ pub struct ReticulumStream {
 
 impl ReticulumInstance {
     pub async fn new(transport: Transport) -> Self {
-        Self {
+        let instance = Self {
             transport: Arc::new(Mutex::new(transport)),
-        }
+        };
+        
+        // Spawn background task to continuously receive announcements
+        let transport_clone = instance.transport.clone();
+        tokio::spawn(async move {
+            let mut receiver = transport_clone.lock().await.recv_announces().await;
+            loop {
+                match receiver.recv().await {
+                    Ok(_ann) => {
+                        log::info!("Received announcement");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        log::debug!("Announcement receiver closed");
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("Announcement receiver lagged by {} messages", n);
+                    }
+                }
+            }
+        });
+        
+        instance
     }
+    
     pub async fn listen(&self, destination: AddressHash) -> Option<ReticulumStream> {
         // wait for new incoming link for destination and extract link_id
         let mut receiver = self.transport.lock().await.in_link_events();
