@@ -82,7 +82,9 @@ enum AuthMode {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Trace)
+        .init();
 
     spawn_socks_server().await
 }
@@ -123,6 +125,7 @@ async fn spawn_socks_server() -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((socket, _client_addr)) => {
+                debug!("got new socks5 connection from {}", _client_addr);
                 let rns_client = rns_client.clone();
                 spawn_and_log_error(serve_socks5(opt, backends.clone(), socket, rns_client));
             }
@@ -176,6 +179,7 @@ async fn serve_socks5(
                 .await?;
             let rns_stream = rns_client.connect(destination).await.unwrap();
             transfer(inner, rns_stream).await;
+            debug!("Socks connection closed");
             return Ok(());
         }
     }

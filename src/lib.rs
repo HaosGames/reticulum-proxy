@@ -1,7 +1,7 @@
 #[forbid(unsafe_code)]
 #[macro_use]
 extern crate log;
-use reticulum::{destination::link::LinkEvent, hash::AddressHash, transport::Transport};
+use reticulum::{destination::{SingleInputDestination, link::LinkEvent}, hash::AddressHash, transport::Transport};
 use std::sync::Arc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -30,7 +30,7 @@ impl ReticulumInstance {
             loop {
                 match receiver.recv().await {
                     Ok(_ann) => {
-                        log::info!("Received announcement");
+                        log::debug!("Received announcement");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         log::debug!("Announcement receiver closed");
@@ -44,6 +44,10 @@ impl ReticulumInstance {
         });
         
         instance
+    }
+
+    pub async fn send_announce(&self, destination: &Arc<Mutex<SingleInputDestination>>) {
+        self.transport.lock().await.send_announce(&destination, None).await;
     }
     
     pub async fn listen(&self, destination: AddressHash) -> Option<ReticulumStream> {
@@ -94,7 +98,9 @@ impl ReticulumInstance {
                         if let LinkEvent::Data(payload) = event.event {
                             trace!("received {} bytes over link: {}", payload.len(), link_id);
                             let data = payload.as_slice().iter().cloned().collect();
-                            received_sender.send(data).await.unwrap();
+                            if let Err(_error) = received_sender.send(data).await {
+                                warn!("received_sender ended while trying to send from reticlulum to stream")
+                            }
                         }
                     } else {
                         trace!("ignoring event with id: {}", event.id);
@@ -116,7 +122,8 @@ impl ReticulumInstance {
                     let packet = link.lock().await.data_packet(data.as_slice()).unwrap();
                     transport.send_packet(packet).await;
                 } else {
-                    debug!("listener to_send_receiver ended. Ending listener send loop");
+                    debug!("listener to_send_receiver ended. Ending listener send loop and closing link");
+                    link.lock().await.close();
                     break;
                 }
             }
@@ -194,7 +201,8 @@ impl ReticulumInstance {
                 );
                 transport.send_packet(packet).await;
             }
-            debug!("connection send loop ended because to send receiver ended");
+            debug!("connection send loop ended because to send receiver ended. Closing link");
+            link.lock().await.close();
         });
 
         // upstream link data: put link data into received channel sender

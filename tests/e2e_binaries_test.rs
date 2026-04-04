@@ -150,7 +150,7 @@ async fn e2e_full_flow() {
     std::fs::remove_file("/tmp/reticulum-reverse-hash").ok();
     
     // Start Rust hub instead of rnsd
-    let mut hub = e2e::start_hub().await;
+    let hub = e2e::start_hub().await;
     sleep(Duration::from_millis(500)).await;
     
     let echo = e2e::start_tcp_echo_server(TCP_ECHO_PORT).await;
@@ -158,7 +158,7 @@ async fn e2e_full_flow() {
     // Start PROXY first this time
     let mut proxy = tokio::process::Command::new(proxy_binary())
         .args(["-l", &format!("127.0.0.1:{}", SOCKS5_PORT), "-r", "127.0.0.1:4711", "no-auth"])
-        .env("RUST_LOG", "info")
+        .env("RUST_LOG", "trace")
         .spawn()
         .expect("Should start proxy");
     
@@ -171,7 +171,7 @@ async fn e2e_full_flow() {
             "-c", "127.0.0.1:4711",
             "-m", mappings.to_str().unwrap(),
         ])
-        .env("RUST_LOG", "info")
+        .env("RUST_LOG", "trace")
         .spawn()
         .expect("Should start reverse-proxy");
     

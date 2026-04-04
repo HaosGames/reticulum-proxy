@@ -4,7 +4,7 @@ extern crate log;
 
 use rand_core::OsRng;
 use reticulum::{
-    destination::DestinationName,
+    destination::{self, DestinationName, SingleInputDestination},
     hash::AddressHash,
     identity::PrivateIdentity,
     iface::tcp_client::TcpClient,
@@ -12,7 +12,7 @@ use reticulum::{
 };
 use serde::{Deserialize, Serialize};
 use socks5_reticulum_proxy::ReticulumInstance;
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 use structopt::StructOpt;
 use tokio::{
     fs::File,
@@ -48,7 +48,7 @@ struct Opt {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Trace)
         .init();
     spawn_reverse_proxy().await
 }
@@ -72,15 +72,16 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     let mut mappings = load_mappings(&opt.mappings_path).await?;
     info!("Loaded {} destination mappings", mappings.len());
 
+    let mut destinations = Vec::with_capacity(mappings.len());
     for mapping in mappings.iter_mut() {
         let destination_name = DestinationName::new(&mapping.0, &mapping.1.aspects);
         let destination = rns_transport
             .add_destination(rns_identity.clone(), destination_name)
             .await;
-        rns_transport.send_announce(&destination, None).await;
         let destination_hash = destination.lock().await.desc.address_hash;
         let hash_str = destination_hash.to_hex_string();
         mapping.1.address_hash = Some(hash_str.clone());
+        destinations.push(destination);
         
         // Write hash to file for discovery
         let hash_file = std::path::PathBuf::from("/tmp/reticulum-reverse-hash");
@@ -94,6 +95,19 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     let rns_client = ReticulumInstance::new(rns_transport).await;
 
     let cancel = CancellationToken::new();
+    for destination in destinations {
+        let cancel = cancel.clone();
+        let rns_client = rns_client.clone();
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                rns_client.send_announce(&destination).await;
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+    }
 
     for mapping in mappings {
         let destination_hash = mapping.1.address_hash.unwrap();
