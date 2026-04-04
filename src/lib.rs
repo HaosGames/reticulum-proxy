@@ -1,11 +1,18 @@
 #[forbid(unsafe_code)]
 #[macro_use]
 extern crate log;
-use reticulum::{destination::{SingleInputDestination, link::LinkEvent}, hash::AddressHash, transport::Transport};
+use reticulum::{
+    destination::{SingleInputDestination, link::LinkEvent},
+    hash::AddressHash,
+    transport::Transport,
+};
 use std::sync::Arc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{Mutex, mpsc::{Receiver, Sender, channel}},
+    sync::{
+        Mutex,
+        mpsc::{Receiver, Sender, channel},
+    },
 };
 #[derive(Clone)]
 pub struct ReticulumInstance {
@@ -22,7 +29,7 @@ impl ReticulumInstance {
         let instance = Self {
             transport: Arc::new(Mutex::new(transport)),
         };
-        
+
         // Spawn background task to continuously receive announcements
         let transport_clone = instance.transport.clone();
         tokio::spawn(async move {
@@ -42,14 +49,18 @@ impl ReticulumInstance {
                 }
             }
         });
-        
+
         instance
     }
 
     pub async fn send_announce(&self, destination: &Arc<Mutex<SingleInputDestination>>) {
-        self.transport.lock().await.send_announce(&destination, None).await;
+        self.transport
+            .lock()
+            .await
+            .send_announce(&destination, None)
+            .await;
     }
-    
+
     pub async fn listen(&self, destination: AddressHash) -> Option<ReticulumStream> {
         // wait for new incoming link for destination and extract link_id
         let mut receiver = self.transport.lock().await.in_link_events();
@@ -100,10 +111,12 @@ impl ReticulumInstance {
                             let data = payload.as_slice().iter().cloned().collect();
                             if let Err(error) = received_sender.send(data).await {
                                 let _bytes = error.0;
-                                warn!("received_sender ended while trying to send from reticlulum to stream")
+                                warn!(
+                                    "received_sender ended while trying to send from reticlulum to stream"
+                                )
                                 // TODO we need to try to re-initiate the connection to the mapped destination
-                                // so that these bytes can be delivered even if that connection ended. 
-                                // For that we may need to eliminate the channel in between 
+                                // so that these bytes can be delivered even if that connection ended.
+                                // For that we may need to eliminate the channel in between
                                 // the ReticulumStream and the TcpStream.
                             }
                         }
@@ -124,10 +137,15 @@ impl ReticulumInstance {
                 if let Some(data) = to_send_receiver.recv().await {
                     trace!("in link {}: sending {} bytes", link_id, data.len());
                     let transport = transport.lock().await;
-                    let packet = link.lock().await.data_packet(data.as_slice()).unwrap();
-                    transport.send_packet(packet).await;
+                    let link = link.lock().await;
+                    for chunk in data.chunks(1024) {
+                        let packet = link.data_packet(chunk).unwrap();
+                        transport.send_packet(packet).await;
+                    }
                 } else {
-                    debug!("listener to_send_receiver ended. Ending listener send loop and closing link");
+                    debug!(
+                        "listener to_send_receiver ended. Ending listener send loop and closing link"
+                    );
                     link.lock().await.close();
                     break;
                 }
@@ -198,13 +216,15 @@ impl ReticulumInstance {
                 let transport = client.transport.lock().await;
                 log::trace!("out link {}: got bytes ({})", link_id, bytes.len());
                 let link = link.lock().await;
-                let packet = link.data_packet(&bytes).unwrap();
-                log::trace!(
-                    "out link {}: sending packet to {}",
-                    link_id,
-                    destination_hash
-                );
-                transport.send_packet(packet).await;
+                for chunk in bytes.chunks(1024) {
+                    let packet = link.data_packet(chunk).unwrap();
+                    log::trace!(
+                        "out link {}: sending packet to {}",
+                        link_id,
+                        destination_hash
+                    );
+                    transport.send_packet(packet).await;
+                }
             }
             debug!("connection send loop ended because to send receiver ended. Closing link");
             link.lock().await.close();
