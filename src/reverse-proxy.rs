@@ -3,16 +3,10 @@
 extern crate log;
 
 use rand_core::OsRng;
-use reticulum::{
-    destination::{DestinationName},
-    hash::AddressHash,
-    identity::PrivateIdentity,
-    iface::tcp_client::TcpClient,
-    transport::{Transport, TransportConfig},
-};
+use reticulum_std::{Destination, DestinationType, Direction, Identity, ReticulumNodeBuilder};
 use serde::{Deserialize, Serialize};
 use socks5_reticulum_proxy::ReticulumInstance;
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 use structopt::StructOpt;
 use tokio::{
     fs::File,
@@ -24,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 /// JSON mapping configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MappingConfig {
-    pub aspects: String,
+    pub aspects: Vec<String>,
     pub forward_to: String,
     pub address_hash: Option<String>,
 }
@@ -40,7 +34,7 @@ struct Opt {
     #[structopt(short = "i", long)]
     pub reticulum_identity_path: PathBuf,
     #[structopt(short = "c", long)]
-    pub reticulum_connection: String,
+    pub reticulum_connection: SocketAddr,
     #[structopt(short = "m", long)]
     pub mappings_path: PathBuf,
 }
@@ -56,83 +50,62 @@ async fn main() -> anyhow::Result<()> {
 async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     let opt: &'static Opt = Box::leak(Box::new(Opt::from_args()));
 
-    let rns_identity = load_or_create_identity(&opt.reticulum_identity_path).await?;
-    let rns_config = TransportConfig::new("reverse-proxy", &rns_identity, true); // enable_transport = true
-    let mut rns_transport = Transport::new(rns_config);
+    let identity = load_or_create_identity(&opt.reticulum_identity_path).await?;
+    let builder = ReticulumNodeBuilder::new()
+        .identity(identity.clone())
+        .add_tcp_client(opt.reticulum_connection);
+    let mut node = builder.build().await.unwrap();
+    node.start().await.unwrap();
 
-    let _client_addr = rns_transport.iface_manager().lock().await.spawn(
-        TcpClient::new(opt.reticulum_connection.as_str()),
-        TcpClient::spawn,
-    );
     info!(
         "Connected to Reticulum instance @ {}",
         opt.reticulum_connection
     );
+    let mut rns = ReticulumInstance::new(node).await;
 
     let mut mappings = load_mappings(&opt.mappings_path).await?;
+    let cancel = CancellationToken::new();
     info!("Loaded {} destination mappings", mappings.len());
 
-    let mut destinations = Vec::with_capacity(mappings.len());
-    for mapping in mappings.iter_mut() {
-        let destination_name = DestinationName::new(&mapping.0, &mapping.1.aspects);
-        let destination = rns_transport
-            .add_destination(rns_identity.clone(), destination_name)
-            .await;
-        let destination_hash = destination.lock().await.desc.address_hash;
-        let hash_str = destination_hash.to_hex_string();
-        mapping.1.address_hash = Some(hash_str.clone());
-        destinations.push(destination);
-        
+    for mut mapping in mappings {
+        let destination = Destination::new(
+            Some(identity.clone()),
+            Direction::In,
+            DestinationType::Single,
+            &mapping.0,
+            &[],
+        )
+        .unwrap();
+        let destination_hash = destination.hash().clone();
+        mapping.1.address_hash = Some(destination_hash.to_string());
+
         // Write hash to file for discovery
         let hash_file = std::path::PathBuf::from("/tmp/reticulum-reverse-hash");
         use tokio::io::AsyncWriteExt;
         if let Ok(mut file) = tokio::fs::File::create(&hash_file).await {
-            file.write_all(format!("{}:{}", mapping.0, hash_str).as_bytes()).await.ok();
+            file.write_all(format!("{}:{}", mapping.0, destination_hash).as_bytes())
+                .await
+                .ok();
             info!("Wrote hash to /tmp/reticulum-reverse-hash");
         }
-    }
 
-    let rns_client = ReticulumInstance::new(rns_transport).await;
-
-    let cancel = CancellationToken::new();
-    for destination in destinations {
-        let cancel = cancel.clone();
-        let rns_client = rns_client.clone();
-        tokio::spawn(async move {
-            loop {
-                if cancel.is_cancelled() {
-                    break;
-                }
-                rns_client.send_announce(&destination).await;
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-        });
-    }
-
-    for mapping in mappings {
-        let destination_hash = mapping.1.address_hash.unwrap();
         let target_addr: SocketAddr = mapping.1.forward_to.parse().map_err(|e| {
             anyhow::anyhow!("Invalid forward address '{}': {}", mapping.1.forward_to, e)
         })?;
         let name = mapping.0.clone();
-        let rns_client = rns_client.clone();
-        let cancel = cancel.clone();
+        let mut listener = rns.listener(destination).await.unwrap();
+        let cancel_token = cancel.clone();
         tokio::spawn(async move {
             info!(
                 "Listening for Reticulum connections @ {} for mapping {}",
                 destination_hash, mapping.0
             );
             loop {
-                match rns_client
-                    .listen(AddressHash::new_from_hex_string(destination_hash.as_str()).unwrap())
-                    .await
-                {
+                match listener.listen().await {
                     Some(stream) => {
                         let name = name.clone();
                         tokio::spawn(async move {
-                            if let Err(e) =
-                                handle_connection(stream, name, target_addr).await
-                            {
+                            if let Err(e) = handle_connection(stream, name, target_addr).await {
                                 error!("Connection handler error: {}", e);
                             }
                         });
@@ -143,27 +116,28 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
                     }
                 }
             }
-            cancel.cancel();
+            cancel_token.cancel();
         });
     }
+
     cancel.cancelled().await;
 
     Ok(())
 }
 
-async fn load_or_create_identity(path: &PathBuf) -> anyhow::Result<PrivateIdentity> {
+async fn load_or_create_identity(path: &PathBuf) -> anyhow::Result<Identity> {
     if let Ok(mut file) = File::open(path).await {
-        let mut hex_string = String::new();
-        file.read_to_string(&mut hex_string).await?;
-        let identity = PrivateIdentity::new_from_hex_string(hex_string.trim())
+        let mut hex_string = Vec::new();
+        file.read_to_end(&mut hex_string).await?;
+        let identity = Identity::from_private_key_bytes(hex_string.as_slice())
             .map_err(|e| anyhow::anyhow!("Failed to parse identity: {:?}", e))?;
         info!("Loaded existing identity from {:?}", path);
         Ok(identity)
     } else {
-        let identity = PrivateIdentity::new_from_rand(OsRng);
-        let hex = identity.to_hex_string();
+        let identity = Identity::generate(&mut OsRng);
+        let hex = identity.private_key_bytes().unwrap();
         let mut file = File::create(path).await?;
-        file.write_all(hex.as_bytes()).await?;
+        file.write_all(hex.as_ref()).await?;
         info!("Created new identity and saved to {:?}", path);
         Ok(identity)
     }

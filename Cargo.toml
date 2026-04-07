@@ -24,7 +24,10 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 serde_json = "1"
 serde = "1"
 
-[dependencies.reticulum]
-git = "https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs"
-#path = "../../remote/Reticulum-rs"
-version = "0.1.*"
+[dependencies.reticulum-std]
+git = "https://codeberg.org/Lew_Palm/leviculum"
+branch = "master"
+
+[dependencies.reticulum-core]
+git = "https://codeberg.org/Lew_Palm/leviculum"
+branch = "master"

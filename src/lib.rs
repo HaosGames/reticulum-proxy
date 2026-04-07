@@ -1,299 +1,301 @@
 #[forbid(unsafe_code)]
 #[macro_use]
 extern crate log;
-use reticulum::{
-    destination::{SingleInputDestination, link::LinkEvent},
-    hash::AddressHash,
-    transport::Transport,
-};
-use std::sync::Arc;
+use anyhow::Result;
+use reticulum_std::{Destination, DestinationHash, LinkId, NodeEvent, ReticulumNode};
+use std::collections::HashMap;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{
-        Mutex,
-        mpsc::{Receiver, Sender, channel},
-    },
+    select,
 };
-#[derive(Clone)]
+use tokio_util::sync::CancellationToken;
+
 pub struct ReticulumInstance {
-    transport: Arc<Mutex<Transport>>,
+    event_loop: tokio::task::JoinHandle<()>,
+    cancel: CancellationToken,
+    connect_requests: tokio::sync::mpsc::Sender<(
+        DestinationHash,
+        tokio::sync::oneshot::Sender<Result<ReticulumStream>>,
+    )>,
+    listener_requests:
+        tokio::sync::mpsc::Sender<(Destination, tokio::sync::oneshot::Sender<Result<Listener>>)>,
 }
 
+pub struct Listener {
+    streams: tokio::sync::mpsc::Receiver<ReticulumStream>,
+}
+
+impl Listener {
+    pub async fn listen(&mut self) -> Option<ReticulumStream> {
+        self.streams.recv().await
+    }
+}
+
+pub struct Connector {
+    request: tokio::sync::mpsc::Sender<(
+        DestinationHash,
+        tokio::sync::oneshot::Sender<Result<ReticulumStream>>,
+    )>,
+}
+
+impl Connector {
+    pub async fn connect(self, hash: DestinationHash) -> Result<ReticulumStream> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.request.send((hash, sender)).await.unwrap();
+        receiver.await.unwrap()
+    }
+}
+
+#[derive(Debug)]
 pub struct ReticulumStream {
-    to_send_sender: Sender<Vec<u8>>,
-    received_receiver: Receiver<Vec<u8>>,
+    received: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    to_send: tokio::sync::mpsc::Sender<(LinkId, Vec<u8>)>,
+    link: LinkId,
+}
+
+struct Context {
+    listeners: HashMap<DestinationHash, tokio::sync::mpsc::Sender<ReticulumStream>>,
+    to_send_sender: tokio::sync::mpsc::Sender<(LinkId, Vec<u8>)>,
+    received: HashMap<LinkId, tokio::sync::mpsc::Sender<Vec<u8>>>,
+    cancel: CancellationToken,
 }
 
 impl ReticulumInstance {
-    pub async fn new(transport: Transport) -> Self {
-        let instance = Self {
-            transport: Arc::new(Mutex::new(transport)),
+    pub async fn new(mut node: ReticulumNode) -> Self {
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+        let (connect_requests_sender, mut connect_requests) = tokio::sync::mpsc::channel(10);
+        let (listener_requests_sender, mut listener_requests) = tokio::sync::mpsc::channel(10);
+        let (to_send_sender, mut to_send) = tokio::sync::mpsc::channel(10);
+
+        let mut context = Context {
+            listeners: Default::default(),
+            received: Default::default(),
+            to_send_sender,
+            cancel: cancel.clone(),
         };
 
-        // Spawn background task to continuously receive announcements
-        let transport_clone = instance.transport.clone();
-        tokio::spawn(async move {
-            let mut receiver = transport_clone.lock().await.recv_announces().await;
+        let event_loop = tokio::spawn(async move {
+            let mut receiver = node
+                .take_event_receiver()
+                .expect("this is the only instance");
             loop {
-                match receiver.recv().await {
-                    Ok(_ann) => {
-                        log::debug!("Received announcement");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        log::debug!("Announcement receiver closed");
+                select! {
+                    _ = cancel_task.cancelled() => {
                         break;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("Announcement receiver lagged by {} messages", n);
+                    event = receiver.recv() => {
+                        if let Some(event) = event {
+                            Self::handle_event(&mut node,event, &mut context).await;
+                        } else {
+                            info!("event loop receiver ended. Shutting down");
+                            cancel_task.cancel();
+                            break;
+                        }
+                    }
+                    request = connect_requests.recv() => {
+                        if let Some((hash, sender)) = request {
+                            Self::handle_connect_request(&mut node, &mut context, hash, sender).await;
+                        } else {
+                            info!("connect_requests receiver ended. Shutting down");
+                            cancel_task.cancel();
+                            break;
+                        }
+                    }
+                    request = listener_requests.recv() => {
+                        if let Some((hash, sender)) = request {
+                            Self::handle_listener_request(&mut node, &mut context, hash, sender).await;
+                        } else {
+                            info!("listener_requests receiver ended. Shutting down");
+                            cancel_task.cancel();
+                            break;
+                        }
+                    }
+                    to_send = to_send.recv() => {
+                        if let Some((link, data)) = to_send {
+                            Self::handle_to_send(&mut node, &mut context, link, data).await;
+                        } else {
+                            info!("listener_requests receiver ended. Shutting down");
+                            cancel_task.cancel();
+                            break;
+                        }
                     }
                 }
             }
         });
+        let instance = Self {
+            event_loop,
+            cancel,
+            connect_requests: connect_requests_sender,
+            listener_requests: listener_requests_sender,
+        };
 
         instance
     }
 
-    pub async fn send_announce(&self, destination: &Arc<Mutex<SingleInputDestination>>) {
-        self.transport
-            .lock()
-            .await
-            .send_announce(&destination, None)
-            .await;
+    pub fn connector(&mut self) -> Connector {
+        Connector {
+            request: self.connect_requests.clone(),
+        }
     }
 
-    pub async fn listen(&self, destination: AddressHash) -> Option<ReticulumStream> {
-        // wait for new incoming link for destination and extract link_id
-        let mut receiver = self.transport.lock().await.in_link_events();
-        let link_id;
-        loop {
-            trace!("waiting for new incoming Link");
-            match receiver.recv().await {
-                Ok(event) => {
-                    if let LinkEvent::Activated = event.event {
-                        if event.address_hash == destination {
-                            link_id = Some(event.id);
-                            debug!(
-                                "in link {}: new active incoming link for destination {}",
-                                event.id, destination
-                            );
-                            break;
-                        }
-                    }
-                }
-                _ => {
-                    debug!("in_link_events_receiver ended");
-                    return None;
-                }
-            }
-        }
-        let link_id = link_id.unwrap();
-        let link = self
-            .transport
-            .lock()
-            .await
-            .find_in_link(&link_id)
+    pub async fn listener(&mut self, destination: Destination) -> Result<Listener> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.listener_requests
+            .send((destination, sender))
             .await
             .unwrap();
-        link.lock().await.prove_messages(true);
-
-        // setup channels
-        let (to_send_sender, mut to_send_receiver) = channel::<Vec<u8>>(1000);
-        let (received_sender, received_receiver) = channel::<Vec<u8>>(1000);
-
-        let transport = self.transport.clone();
-        let _receive_loop = tokio::spawn(async move {
-            let mut events = transport.lock().await.in_link_events();
-            loop {
-                if let Ok(event) = events.recv().await {
-                    if event.id == link_id {
-                        if let LinkEvent::Data(payload) = event.event {
-                            trace!("received {} bytes over link: {}", payload.len(), link_id);
-                            let data = payload.as_slice().iter().cloned().collect();
-                            if let Err(error) = received_sender.send(data).await {
-                                let _bytes = error.0;
-                                warn!(
-                                    "received_sender ended while trying to send from reticlulum to stream"
-                                )
-                                // TODO we need to try to re-initiate the connection to the mapped destination
-                                // so that these bytes can be delivered even if that connection ended.
-                                // For that we may need to eliminate the channel in between
-                                // the ReticulumStream and the TcpStream.
-                            }
-                        }
-                    } else {
-                        trace!("ignoring event with id: {}", event.id);
-                    }
-                } else {
-                    debug!("listener in link event receiver ended. Ending Listener receive loop");
-                    break;
-                }
-            }
-            debug!("listener receive loop ended");
-        });
-
-        let transport = self.transport.clone();
-        let _send_loop = tokio::spawn(async move {
-            loop {
-                if let Some(data) = to_send_receiver.recv().await {
-                    trace!("in link {}: sending {} bytes", link_id, data.len());
-                    let transport = transport.lock().await;
-                    let link = link.lock().await;
-                    for chunk in data.chunks(1024) {
-                        let packet = link.data_packet(chunk).unwrap();
-                        transport.send_packet(packet).await;
-                    }
-                } else {
-                    debug!(
-                        "listener to_send_receiver ended. Ending listener send loop and closing link"
-                    );
-                    link.lock().await.close();
-                    break;
-                }
-            }
-            debug!("listener send_loop ended");
-        });
-        Some(ReticulumStream {
-            to_send_sender,
-            received_receiver,
-        })
+        receiver.await.unwrap()
     }
-    pub async fn connect(
-        &self,
-        destination_hash: AddressHash,
-    ) -> Result<ReticulumStream, std::io::Error> {
-        // try to retreive destination description for link creation
-        let transport = self.transport.lock().await;
-        let mut receiver = transport.out_link_events();
-        let destination = transport.get_out_destination(&destination_hash).await;
-        let Some(destination) = destination else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrNotAvailable,
-                "did not receive an announcement for that address yet",
-            ));
-        };
-        let description = destination.lock().await.desc.clone();
 
-        //set up link
-        trace!("creating link for out destination: {}", destination_hash);
-        let link = transport.link(description).await;
-        link.lock().await.prove_messages(true);
-        let link_id = link.lock().await.id().clone();
-        debug!(
-            "out link {}: created for out destination {}",
-            link_id, destination_hash
-        );
-
-        // wait for link activation
-        loop {
-            trace!("out link {}: waiting for activation", link_id);
-            match receiver.recv().await {
-                Ok(event) => {
-                    if let LinkEvent::Activated = event.event {
-                        if event.id == link_id {
-                            trace!("out link {}: activated", event.id);
-                            break;
-                        }
-                    }
-                }
-                _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "out_link_receiver ended while waiting for link activation",
-                    ));
-                }
+    async fn handle_connect_request(
+        node: &mut ReticulumNode,
+        ctx: &mut Context,
+        hash: DestinationHash,
+        sender: tokio::sync::oneshot::Sender<Result<ReticulumStream>>,
+    ) {
+        todo!()
+    }
+    async fn handle_listener_request(
+        node: &mut ReticulumNode,
+        ctx: &mut Context,
+        destination: Destination,
+        sender: tokio::sync::oneshot::Sender<Result<Listener>>,
+    ) {
+        todo!()
+    }
+    async fn handle_to_send(
+        node: &mut ReticulumNode,
+        ctx: &mut Context,
+        link: LinkId,
+        data: Vec<u8>,
+    ) {
+        todo!()
+    }
+    async fn handle_event(node: &mut ReticulumNode, event: NodeEvent, listeners: &mut Context) {
+        match event {
+            NodeEvent::AnnounceReceived {
+                announce,
+                interface_index,
+            } => todo!(),
+            NodeEvent::PathFound {
+                destination_hash,
+                hops,
+                interface_index,
+            } => todo!(),
+            NodeEvent::PathRequestReceived { destination_hash } => todo!(),
+            NodeEvent::PathLost { destination_hash } => todo!(),
+            NodeEvent::PacketReceived {
+                destination,
+                data,
+                interface_index,
+            } => todo!(),
+            NodeEvent::PacketDeliveryConfirmed { packet_hash } => todo!(),
+            NodeEvent::DeliveryFailed { packet_hash, error } => todo!(),
+            NodeEvent::LinkRequest {
+                link_id,
+                destination_hash,
+                peer_keys,
+            } => {
+                // Establish Link
             }
+            NodeEvent::LinkEstablished {
+                link_id,
+                is_initiator,
+            } => {
+                // Build ReticulumStream
+                // Send ReticulumStream to listener
+            }
+            NodeEvent::MessageReceived {
+                link_id,
+                msgtype,
+                sequence,
+                data,
+            } => todo!(),
+            NodeEvent::LinkDataReceived { link_id, data } => todo!(),
+            NodeEvent::LinkStale { link_id } => todo!(),
+            NodeEvent::LinkRecovered { link_id } => todo!(),
+            NodeEvent::ChannelRetransmit {
+                link_id,
+                sequence,
+                tries,
+            } => todo!(),
+            NodeEvent::LinkIdentified {
+                link_id,
+                identity_hash,
+            } => todo!(),
+            NodeEvent::LinkClosed {
+                link_id,
+                reason,
+                is_initiator,
+                destination_hash,
+            } => todo!(),
+            NodeEvent::PacketProofRequested {
+                packet_hash,
+                destination_hash,
+            } => todo!(),
+            NodeEvent::LinkProofRequested {
+                link_id,
+                packet_hash,
+            } => todo!(),
+            NodeEvent::LinkDeliveryConfirmed {
+                link_id,
+                packet_hash,
+            } => todo!(),
+            NodeEvent::ResourceAdvertised {
+                link_id,
+                resource_hash,
+                transfer_size,
+                data_size,
+            } => todo!(),
+            NodeEvent::ResourceTransferStarted {
+                link_id,
+                resource_hash,
+                is_sender,
+            } => todo!(),
+            NodeEvent::ResourceProgress {
+                link_id,
+                resource_hash,
+                progress,
+                transfer_size,
+                data_size,
+                is_sender,
+            } => todo!(),
+            NodeEvent::ResourceCompleted {
+                link_id,
+                resource_hash,
+                data,
+                metadata,
+                is_sender,
+                segment_index,
+                total_segments,
+            } => todo!(),
+            NodeEvent::ResourceFailed {
+                link_id,
+                resource_hash,
+                error,
+                is_sender,
+            } => todo!(),
+            NodeEvent::RequestReceived {
+                link_id,
+                request_id,
+                path,
+                path_hash,
+                data,
+                requested_at,
+            } => todo!(),
+            NodeEvent::ResponseReceived {
+                link_id,
+                request_id,
+                response_data,
+            } => todo!(),
+            NodeEvent::RequestTimedOut {
+                link_id,
+                request_id,
+            } => todo!(),
+            NodeEvent::InterfaceDown(_) => todo!(),
+            _ => todo!(),
         }
-        drop(transport);
-
-        // setup channels
-        let (to_send_sender, mut to_send_receiver) = channel::<Vec<u8>>(1000);
-        let (received_sender, received_receiver) = channel(1000);
-
-        // send loop: read data from to_send channel receiver and send on links
-        let client = self.clone();
-        let _send_loop = tokio::spawn(async move {
-            while let Some(bytes) = to_send_receiver.recv().await {
-                let transport = client.transport.lock().await;
-                log::trace!("out link {}: got bytes ({})", link_id, bytes.len());
-                let link = link.lock().await;
-                for chunk in bytes.chunks(1024) {
-                    let packet = link.data_packet(chunk).unwrap();
-                    log::trace!(
-                        "out link {}: sending packet to {}",
-                        link_id,
-                        destination_hash
-                    );
-                    transport.send_packet(packet).await;
-                }
-            }
-            debug!("connection send loop ended because to send receiver ended. Closing link");
-            link.lock().await.close();
-        });
-
-        // upstream link data: put link data into received channel sender
-        let client = self.clone();
-        let _receive_loop = tokio::spawn(async move {
-            let mut out_link_events = client.transport.lock().await.out_link_events();
-            loop {
-                match out_link_events.recv().await {
-                    Ok(event) => {
-                        if event.id != link_id {
-                            trace!(
-                                "ignoring out link event: id {}, destination {}",
-                                event.id, event.address_hash
-                            );
-                            continue;
-                        }
-                        match event.event {
-                            LinkEvent::Activated => {
-                                trace!("out link {}: got activated event", link_id);
-                            }
-                            LinkEvent::Data(payload) => {
-                                log::trace!(
-                                    "out link {}: received payload ({} bytes)",
-                                    event.id,
-                                    payload.len()
-                                );
-                                let data: Vec<u8> = payload.as_slice().iter().cloned().collect();
-                                match received_sender.send(data).await {
-                                    Ok(()) => {}
-                                    Err(err) => {
-                                        log::error!(
-                                            "out link {}: error while sending received bytes to stream: {err:?}. Ending connection receive loop",
-                                            link_id
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                            LinkEvent::Closed => {
-                                debug!(
-                                    "out link {}: closed. Ending connection receive loop",
-                                    link_id
-                                );
-                                break;
-                            }
-                            LinkEvent::Proof(_) => {
-                                debug!("out link {}: got proof event", link_id);
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::debug!("connection out link receiver lagged: {n}");
-                    }
-                    Err(err) => {
-                        log::error!("connection out link receiver error: {err:?}");
-                        break;
-                    }
-                }
-            }
-            debug!("connection receive loop ended");
-        });
-
-        Ok(ReticulumStream {
-            to_send_sender,
-            received_receiver,
-        })
     }
 }
 
@@ -303,7 +305,7 @@ impl AsyncRead for ReticulumStream {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        match self.received_receiver.poll_recv(cx) {
+        match self.received.poll_recv(cx) {
             std::task::Poll::Ready(Some(data)) => {
                 buf.put_slice(data.as_slice());
                 std::task::Poll::Ready(Ok(()))
@@ -321,7 +323,7 @@ impl AsyncWrite for ReticulumStream {
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let data = buf.iter().cloned().collect();
-        match self.to_send_sender.try_send(data) {
+        match self.to_send.try_send((self.link, data)) {
             Ok(()) => std::task::Poll::Ready(Ok(buf.len())),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => std::task::Poll::Ready(Err(
                 std::io::Error::new(std::io::ErrorKind::ConnectionReset, ""),
@@ -341,7 +343,7 @@ impl AsyncWrite for ReticulumStream {
         mut self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        self.received_receiver.close();
+        self.received.close();
         std::task::Poll::Ready(Ok(()))
     }
 }

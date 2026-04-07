@@ -8,13 +8,8 @@ use fast_socks5::{
     util::target_addr::TargetAddr,
 };
 use rand_core::OsRng;
-use reticulum::{
-    hash::AddressHash,
-    identity::PrivateIdentity,
-    iface::tcp_client::TcpClient,
-    transport::{Transport, TransportConfig},
-};
-use socks5_reticulum_proxy::ReticulumInstance;
+use reticulum_std::{DestinationHash, Identity, ReticulumNodeBuilder};
+use socks5_reticulum_proxy::{Connector, ReticulumInstance};
 use std::{
     collections::HashSet,
     future::Future,
@@ -92,28 +87,15 @@ async fn spawn_socks_server() -> Result<()> {
 
     let backends = Arc::new(RwLock::new(HashSet::new()));
 
-    let rns_identitiy = PrivateIdentity::new_from_rand(OsRng);
-    let rns_config = TransportConfig::new("socks5-proxy", &rns_identitiy, true); // enable_transport = true
-    let mut rns_transport = Transport::new(rns_config);
-    
-    // Create a dummy destination so the proxy is a proper Reticulum node
-    // This helps with announcement propagation
-    let proxy_dest = rns_transport.add_destination(
-        rns_identitiy.clone(),
-        reticulum::destination::DestinationName::new("socks5-proxy", "tcp"),
-    ).await;
-    
-    let _client_addr = rns_transport.iface_manager().lock().await.spawn(
-        TcpClient::new(opt.reticulum_addr.as_str()),
-        TcpClient::spawn,
-    );
+    let identity = Identity::generate(&mut OsRng);
+    let builder = ReticulumNodeBuilder::new()
+        .identity(identity.clone())
+        .add_tcp_client(opt.reticulum_addr.parse().unwrap());
+    let mut node = builder.build().await.unwrap();
+    node.start().await.unwrap();
     info!("Connected to Reticulum Instance @ {}", opt.reticulum_addr);
-    
-    // Announce our presence and receive announcements from others
-    rns_transport.send_announce(&proxy_dest, None).await;
-    rns_transport.recv_announces().await;
-    
-    let rns_client = ReticulumInstance::new(rns_transport).await;
+
+    let mut rns = ReticulumInstance::new(node).await;
 
     let listener = TcpListener::bind(&opt.listen_addr).await?;
 
@@ -124,8 +106,8 @@ async fn spawn_socks_server() -> Result<()> {
         match listener.accept().await {
             Ok((socket, _client_addr)) => {
                 debug!("got new socks5 connection from {}", _client_addr);
-                let rns_client = rns_client.clone();
-                spawn_and_log_error(serve_socks5(opt, backends.clone(), socket, rns_client));
+                let connector = rns.connector();
+                spawn_and_log_error(serve_socks5(opt, backends.clone(), socket, connector));
             }
             Err(err) => {
                 error!("accept error = {:?}", err);
@@ -140,7 +122,7 @@ async fn serve_socks5(
     opt: &Opt,
     backends: Arc<RwLock<HashSet<String>>>,
     socket: tokio::net::TcpStream,
-    rns_client: ReticulumInstance,
+    connector: Connector,
 ) -> Result<(), SocksError> {
     let (proto, cmd, target_addr) = match &opt.auth {
         AuthMode::NoAuth => Socks5ServerProtocol::accept_no_auth(socket).await?,
@@ -168,14 +150,15 @@ async fn serve_socks5(
             let Some(destination) = domain.strip_suffix(".rns") else {
                 return Err(ReplyError::AddressTypeNotSupported.into());
             };
-            let Ok(destination) = AddressHash::new_from_hex_string(destination) else {
+            let Ok(bytes) = destination.as_bytes().try_into() else {
                 return Err(ReplyError::AddressTypeNotSupported.into());
             };
+            let destination = DestinationHash::new(bytes);
 
             let inner = proto
                 .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
                 .await?;
-            let rns_stream = rns_client.connect(destination).await.unwrap();
+            let rns_stream = connector.connect(destination).await.unwrap();
             transfer(inner, rns_stream).await;
             debug!("Socks connection closed");
             return Ok(());
