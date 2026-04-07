@@ -127,17 +127,17 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
 
 async fn load_or_create_identity(path: &PathBuf) -> anyhow::Result<Identity> {
     if let Ok(mut file) = File::open(path).await {
-        let mut hex_string = Vec::new();
-        file.read_to_end(&mut hex_string).await?;
-        let identity = Identity::from_private_key_bytes(hex_string.as_slice())
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await?;
+        let identity = Identity::from_private_key_bytes(bytes.as_slice())
             .map_err(|e| anyhow::anyhow!("Failed to parse identity: {:?}", e))?;
         info!("Loaded existing identity from {:?}", path);
         Ok(identity)
     } else {
         let identity = Identity::generate(&mut OsRng);
-        let hex = identity.private_key_bytes().unwrap();
+        let bytes = identity.private_key_bytes().unwrap();
         let mut file = File::create(path).await?;
-        file.write_all(hex.as_ref()).await?;
+        file.write_all(bytes.as_ref()).await?;
         info!("Created new identity and saved to {:?}", path);
         Ok(identity)
     }
