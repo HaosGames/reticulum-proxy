@@ -29,7 +29,7 @@ fn reverse_proxy_binary() -> PathBuf {
         .join("reverse-proxy")
 }
 
-fn create_identity(path: &PathBuf, name: &str) {
+fn create_identity(path: &PathBuf) {
     let identity = reticulum_std::Identity::generate(&mut OsRng);
     let bytes = identity.private_key_bytes().unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).ok();
@@ -64,7 +64,7 @@ async fn e2e_proxy_starts() {
     std::fs::create_dir_all(&test_dir).ok();
 
     let proxy_identity = test_dir.join("proxy_identity.hex");
-    create_identity(&proxy_identity, "e2e_proxy");
+    create_identity(&proxy_identity);
 
     // Start Rust hub instead of rnsd
     let _hub = e2e::start_hub().await;
@@ -100,7 +100,7 @@ async fn e2e_reverse_proxy_starts() {
     std::fs::create_dir_all(&test_dir).ok();
 
     let reverse_identity = test_dir.join("reverse_identity.hex");
-    create_identity(&reverse_identity, "e2e_reverse");
+    create_identity(&reverse_identity);
 
     let mappings = test_dir.join("mappings.json");
     create_mappings(&mappings, TCP_ECHO_PORT);
@@ -153,8 +153,8 @@ async fn e2e_full_flow() {
 
     let proxy_identity = test_dir.join("proxy_identity.hex");
     let reverse_identity = test_dir.join("reverse_identity.hex");
-    create_identity(&proxy_identity, "e2e_proxy");
-    create_identity(&reverse_identity, "e2e_reverse");
+    create_identity(&proxy_identity);
+    create_identity(&reverse_identity);
 
     let mappings = test_dir.join("mappings.json");
     create_mappings(&mappings, TCP_ECHO_PORT);
@@ -163,7 +163,7 @@ async fn e2e_full_flow() {
     std::fs::remove_file("/tmp/reticulum-reverse-hash").ok();
 
     // Start Rust hub instead of rnsd
-    let hub = e2e::start_hub().await;
+    let _hub = e2e::start_hub().await;
     sleep(Duration::from_millis(500)).await;
 
     let echo = e2e::start_tcp_echo_server(TCP_ECHO_PORT).await;

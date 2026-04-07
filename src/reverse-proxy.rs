@@ -63,7 +63,7 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     );
     let mut rns = ReticulumInstance::new(node).await;
 
-    let mut mappings = load_mappings(&opt.mappings_path).await?;
+    let mappings = load_mappings(&opt.mappings_path).await?;
     let cancel = CancellationToken::new();
     info!("Loaded {} destination mappings", mappings.len());
 
