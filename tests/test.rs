@@ -61,12 +61,6 @@ async fn send_receive() {
     )
     .unwrap();
     let dest_a_hash = dest_a.hash().clone();
-    transport_a
-        .announce_destination(&dest_a_hash, None)
-        .await
-        .unwrap();
-    transport_c.request_path(&dest_a_hash).await.unwrap();
-    time::sleep(Duration::from_secs(1)).await;
 
     let mut instance_a = ReticulumInstance::new(transport_a).await;
     let mut instance_c = ReticulumInstance::new(transport_c).await;
@@ -84,6 +78,7 @@ async fn send_receive() {
             info!("Listen for connection ended");
         }
     });
+    time::sleep(Duration::from_secs(3)).await;
     let send_loop = tokio::spawn(async move {
         let connector = instance_c.connector();
         let mut stream = connector.connect(dest_a_hash).await.unwrap();
@@ -110,11 +105,6 @@ async fn send_receive_reverse() {
     )
     .unwrap();
     let dest_a_hash = dest_a.hash().clone();
-    transport_a
-        .announce_destination(&dest_a_hash, None)
-        .await
-        .unwrap();
-    transport_c.request_path(&dest_a_hash).await.unwrap();
     time::sleep(Duration::from_secs(1)).await;
 
     let mut instance_a = ReticulumInstance::new(transport_a).await;

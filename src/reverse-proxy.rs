@@ -34,7 +34,7 @@ struct Opt {
     #[structopt(short = "i", long)]
     pub reticulum_identity_path: PathBuf,
     #[structopt(short = "c", long)]
-    pub reticulum_connection: SocketAddr,
+    pub reticulum_connection: String,
     #[structopt(short = "m", long)]
     pub mappings_path: PathBuf,
 }
@@ -53,7 +53,7 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     let identity = load_or_create_identity(&opt.reticulum_identity_path).await?;
     let builder = ReticulumNodeBuilder::new()
         .identity(identity.clone())
-        .add_tcp_client(opt.reticulum_connection);
+        .add_tcp_client(opt.reticulum_connection.parse().unwrap());
     let mut node = builder.build().await.unwrap();
     node.start().await.unwrap();
 
