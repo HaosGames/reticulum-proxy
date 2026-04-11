@@ -1,7 +1,4 @@
 #[forbid(unsafe_code)]
-#[macro_use]
-extern crate log;
-
 use fast_socks5::{
     ReplyError, Result, Socks5Command, SocksError, client,
     server::{Socks5ServerProtocol, transfer},
@@ -21,6 +18,7 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::{net::TcpListener, sync::RwLock, task};
+use tracing::{debug, error, info, level_filters::LevelFilter, warn};
 
 /// # How to use it:
 ///
@@ -75,10 +73,10 @@ enum AuthMode {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Trace)
+    tracing_subscriber::fmt()
+        .compact()
+        .with_max_level(LevelFilter::TRACE)
         .init();
-
     spawn_socks_server().await
 }
 
@@ -150,10 +148,11 @@ async fn serve_socks5(
             let Some(destination) = domain.strip_suffix(".rns") else {
                 return Err(ReplyError::AddressTypeNotSupported.into());
             };
-            let Ok(bytes) = destination.as_bytes().try_into() else {
+            let mut buffer = [0u8; 16];
+            let Ok(_) = hex::decode_to_slice(destination, &mut buffer) else {
                 return Err(ReplyError::AddressTypeNotSupported.into());
             };
-            let destination = DestinationHash::new(bytes);
+            let destination = DestinationHash::new(buffer);
 
             let inner = proto
                 .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))

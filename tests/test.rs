@@ -13,9 +13,7 @@ use tokio::time;
 static INIT: Once = Once::new();
 
 fn setup() {
-    INIT.call_once(|| {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init()
-    });
+    INIT.call_once(|| tracing_subscriber::fmt().compact().init());
 }
 
 async fn build_transport_full(

@@ -1,6 +1,4 @@
 #[forbid(unsafe_code)]
-#[macro_use]
-extern crate log;
 use anyhow::{Result, anyhow};
 use reticulum_core::link::LinkState;
 use reticulum_std::{Destination, DestinationHash, LinkHandle, LinkId, NodeEvent, ReticulumNode};
@@ -13,6 +11,7 @@ use tokio::{
     select,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, warn};
 
 pub struct ReticulumInstance {
     event_loop: tokio::task::JoinHandle<()>,

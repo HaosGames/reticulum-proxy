@@ -1,7 +1,4 @@
 #[forbid(unsafe_code)]
-#[macro_use]
-extern crate log;
-
 use rand_core::OsRng;
 use reticulum_std::{Destination, DestinationType, Direction, Identity, ReticulumNodeBuilder};
 use serde::{Deserialize, Serialize};
@@ -14,6 +11,7 @@ use tokio::{
     net::TcpStream,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::{error, info, level_filters::LevelFilter};
 
 /// JSON mapping configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -41,8 +39,9 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Trace)
+    tracing_subscriber::fmt()
+        .compact()
+        .with_max_level(LevelFilter::TRACE)
         .init();
     spawn_reverse_proxy().await
 }
@@ -68,7 +67,7 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     info!("Loaded {} destination mappings", mappings.len());
 
     for mut mapping in mappings {
-        let destination = Destination::new(
+        let mut destination = Destination::new(
             Some(identity.clone()),
             Direction::In,
             DestinationType::Single,
@@ -76,6 +75,7 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
             &[],
         )
         .unwrap();
+        destination.set_accepts_links(true);
         let destination_hash = destination.hash().clone();
         mapping.1.address_hash = Some(destination_hash.to_string());
 
@@ -98,7 +98,8 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
         tokio::spawn(async move {
             info!(
                 "Listening for Reticulum connections @ {} for mapping {}",
-                destination_hash, mapping.0
+                hex::encode(destination_hash.as_bytes()),
+                mapping.0
             );
             loop {
                 match listener.listen().await {
