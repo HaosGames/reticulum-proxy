@@ -3,10 +3,10 @@ use std::{sync::Once, time::Duration};
 use bytes::BytesMut;
 use log::info;
 use rand_core::OsRng;
+use reticulum_proxy::ReticulumInstance;
 use reticulum_std::{
     Destination, DestinationType, Direction, Identity, ReticulumNode, ReticulumNodeBuilder,
 };
-use socks5_reticulum_proxy::ReticulumInstance;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time;
 

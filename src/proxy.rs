@@ -5,8 +5,8 @@ use fast_socks5::{
     util::target_addr::TargetAddr,
 };
 use rand_core::OsRng;
+use reticulum_proxy::{Connector, ReticulumInstance};
 use reticulum_std::{DestinationHash, Identity, ReticulumNodeBuilder};
-use socks5_reticulum_proxy::{Connector, ReticulumInstance};
 use std::{
     collections::HashSet,
     future::Future,

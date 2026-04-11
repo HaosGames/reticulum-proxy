@@ -955,6 +955,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "env_logger",
+ "fast-socks5",
+ "hex",
+ "log",
+ "rand_core",
+ "reticulum-core",
+ "reticulum-std",
+ "serde",
+ "serde_json",
+ "structopt",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "reticulum-std"
 version = "0.6.3"
 source = "git+https://codeberg.org/Lew_Palm/leviculum?branch=master#741679f9afb090ca1d8372c14fd28e4b5550d748"
@@ -1177,28 +1199,6 @@ checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "socks5-reticulum-proxy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "env_logger",
- "fast-socks5",
- "hex",
- "log",
- "rand_core",
- "reticulum-core",
- "reticulum-std",
- "serde",
- "serde_json",
- "structopt",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

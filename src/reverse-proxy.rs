@@ -1,8 +1,8 @@
 #[forbid(unsafe_code)]
 use rand_core::OsRng;
+use reticulum_proxy::ReticulumInstance;
 use reticulum_std::{Destination, DestinationType, Direction, Identity, ReticulumNodeBuilder};
 use serde::{Deserialize, Serialize};
-use socks5_reticulum_proxy::ReticulumInstance;
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 use structopt::StructOpt;
 use tokio::{
@@ -154,7 +154,7 @@ async fn load_mappings(path: &PathBuf) -> anyhow::Result<Mappings> {
 }
 
 async fn handle_connection(
-    mut stream: socks5_reticulum_proxy::ReticulumStream,
+    mut stream: reticulum_proxy::ReticulumStream,
     name: String,
     target_addr: SocketAddr,
 ) -> anyhow::Result<()> {
