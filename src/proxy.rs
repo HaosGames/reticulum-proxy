@@ -18,7 +18,10 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::{net::TcpListener, sync::RwLock, task};
-use tracing::{debug, error, info, level_filters::LevelFilter, warn};
+use tracing::{
+    Instrument, Level, debug, error, event, info, instrument, level_filters::LevelFilter, span,
+    warn,
+};
 
 /// # How to use it:
 ///
@@ -101,21 +104,33 @@ async fn spawn_socks_server() -> Result<()> {
 
     // Standard TCP loop
     loop {
-        match listener.accept().await {
-            Ok((socket, _client_addr)) => {
-                debug!("got new socks5 connection from {}", _client_addr);
-                let connector = rns.connector();
-                spawn_and_log_error(serve_socks5(opt, backends.clone(), socket, connector));
-            }
-            Err(err) => {
-                error!("accept error = {:?}", err);
+        async {
+            match listener.accept().await {
+                Ok((socket, client_addr)) => {
+                    debug!(
+                        client_addr = client_addr.to_string(),
+                        "got new socks5 connection"
+                    );
+                    let connector = rns.connector();
+                    spawn_and_log_error(serve_socks5(opt, backends.clone(), socket, connector));
+                }
+                Err(err) => {
+                    error!(err = %err, "error when accepting socks5 connection");
+                }
             }
         }
+        .instrument(span!(
+            Level::INFO,
+            "accepting socs5 connection",
+            listen_addr = opt.listen_addr
+        ))
+        .await
     }
 }
 
 static CONN_NUM: AtomicUsize = AtomicUsize::new(0);
 
+#[instrument(skip(opt, backends, socket, connector))]
 async fn serve_socks5(
     opt: &Opt,
     backends: Arc<RwLock<HashSet<String>>>,
@@ -157,9 +172,9 @@ async fn serve_socks5(
             let inner = proto
                 .reply_success(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
                 .await?;
-            let rns_stream = connector.connect(destination).await.unwrap();
+            let rns_stream = connector.connect(destination).await?;
             transfer(inner, rns_stream).await;
-            debug!("Socks connection closed");
+            debug!("socks connection closed");
             return Ok(());
         }
     }

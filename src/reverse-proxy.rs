@@ -9,9 +9,10 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    select,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, level_filters::LevelFilter};
+use tracing::{Level, debug, error, info, instrument, level_filters::LevelFilter, span};
 
 /// JSON mapping configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -97,24 +98,35 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
         let cancel_token = cancel.clone();
         tokio::spawn(async move {
             info!(
-                "Listening for Reticulum connections @ {} for mapping {}",
-                hex::encode(destination_hash.as_bytes()),
-                mapping.0
+                destination.hash = hex::encode(destination_hash.as_bytes()),
+                destination.name = mapping.0,
+                "listening for Reticulum connections",
             );
             loop {
-                match listener.listen().await {
-                    Some(stream) => {
-                        let name = name.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, name, target_addr).await {
-                                error!("Connection handler error: {}", e);
+                select! {
+                    result = listener.listen() => {
+                        match result {
+                            Some(stream) => {
+                                let name = name.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = handle_connection(stream, name, target_addr).await {
+                                        error!("Connection handler error: {}", e);
+                                    }
+                                });
                             }
-                        });
+                            None => {
+                                error!(
+                                    destination.hash = hex::encode(destination_hash.as_bytes()),
+                                    destination.name = mapping.0,
+                                    "reticulum listener ended");
+                                cancel_token.cancel();
+                            }
+                        }
                     }
-                    None => {
-                        error!("Reticulum listener ended");
+                    _ = cancel_token.cancelled() => {
                         break;
                     }
+
                 }
             }
             cancel_token.cancel();
@@ -126,52 +138,61 @@ async fn spawn_reverse_proxy() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[instrument]
 async fn load_or_create_identity(path: &PathBuf) -> anyhow::Result<Identity> {
     if let Ok(mut file) = File::open(path).await {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).await?;
         let identity = Identity::from_private_key_bytes(bytes.as_slice())
             .map_err(|e| anyhow::anyhow!("Failed to parse identity: {:?}", e))?;
-        info!("Loaded existing identity from {:?}", path);
+        info!("loaded existing identity");
         Ok(identity)
     } else {
         let identity = Identity::generate(&mut OsRng);
         let bytes = identity.private_key_bytes().unwrap();
         let mut file = File::create(path).await?;
         file.write_all(bytes.as_ref()).await?;
-        info!("Created new identity and saved to {:?}", path);
+        info!("created and saved new identity");
         Ok(identity)
     }
 }
 
+#[instrument]
 async fn load_mappings(path: &PathBuf) -> anyhow::Result<Mappings> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read mappings file {:?}: {}", path, e))?;
     let mappings: Mappings = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("Failed to parse mappings JSON: {}", e))?;
+    info!("loaded mappings");
     Ok(mappings)
 }
 
+#[instrument(skip(stream))]
 async fn handle_connection(
     mut stream: reticulum_proxy::ReticulumStream,
     name: String,
     target_addr: SocketAddr,
 ) -> anyhow::Result<()> {
-    info!("Forwarding connection for '{}' to {}", name, target_addr);
     let mut target = TcpStream::connect(target_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to target {}: {}", target_addr, e))?;
 
     match tokio::io::copy_bidirectional(&mut stream, &mut target).await {
         Ok((a, b)) => {
-            info!(
-                "Connection closed for '{}': {} bytes sent, {} bytes received",
-                name, a, b
+            debug!(
+                destination.name = name,
+                sent.bytes = a,
+                received.bytes = b,
+                "connection closed",
             );
         }
         Err(e) => {
-            error!("Connection error for '{}': {}", name, e);
+            error!(
+                destination.name = name,
+                error = %e,
+                "connection error for",
+            );
         }
     }
     Ok(())

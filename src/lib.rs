@@ -4,6 +4,7 @@ use reticulum_core::link::LinkState;
 use reticulum_std::{Destination, DestinationHash, LinkHandle, LinkId, NodeEvent, ReticulumNode};
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Display,
     time::Duration,
 };
 use tokio::{
@@ -11,7 +12,7 @@ use tokio::{
     select,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{Value, debug, error, info, instrument, trace, warn};
 
 pub struct ReticulumInstance {
     event_loop: tokio::task::JoinHandle<()>,
@@ -24,16 +25,19 @@ pub struct ReticulumInstance {
         tokio::sync::mpsc::Sender<(Destination, tokio::sync::oneshot::Sender<Result<Listener>>)>,
 }
 
+#[derive(Debug)]
 pub struct Listener {
     streams: tokio::sync::mpsc::Receiver<ReticulumStream>,
 }
 
 impl Listener {
+    #[instrument(skip(self))]
     pub async fn listen(&mut self) -> Option<ReticulumStream> {
         self.streams.recv().await
     }
 }
 
+#[derive(Debug)]
 pub struct Connector {
     request: tokio::sync::mpsc::Sender<(
         DestinationHash,
@@ -42,10 +46,12 @@ pub struct Connector {
 }
 
 impl Connector {
+    #[instrument(skip(self))]
     pub async fn connect(self, hash: DestinationHash) -> Result<ReticulumStream> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.request.send((hash, sender)).await.unwrap();
-        receiver.await.unwrap()
+        trace!("sent connect request to event channel");
+        receiver.await?
     }
 }
 
@@ -135,7 +141,7 @@ impl ReticulumInstance {
                             break;
                         }
                     }
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {
                         for destination in &context.announce {
                             node.announce_destination(&destination, None).await.unwrap();
                         }
@@ -157,12 +163,14 @@ impl ReticulumInstance {
         instance
     }
 
+    #[instrument(skip(self))]
     pub fn connector(&mut self) -> Connector {
         Connector {
             request: self.connect_requests.clone(),
         }
     }
 
+    #[instrument(skip(self, destination), fields(destination.hash = destination.hash().to_string()))]
     pub async fn listener(&mut self, destination: Destination) -> Result<Listener> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.listener_requests
@@ -172,14 +180,16 @@ impl ReticulumInstance {
         receiver.await.unwrap()
     }
 
+    #[instrument(skip(node, ctx, response))]
     async fn handle_connect_request(
         node: &mut ReticulumNode,
         ctx: &mut Context,
         hash: DestinationHash,
-        sender: tokio::sync::oneshot::Sender<Result<ReticulumStream>>,
+        response: tokio::sync::oneshot::Sender<Result<ReticulumStream>>,
     ) -> Result<()> {
+        trace!("handle connect request");
         let Some(keys) = node.get_identity(&hash) else {
-            sender
+            response
                 .send(Err(anyhow!(
                     "no announcement received yet for destination {}",
                     hash
@@ -195,12 +205,13 @@ impl ReticulumInstance {
         let keys = keys.public_key_bytes();
         let mut signing_key = [0u8; 32];
         signing_key.copy_from_slice(&keys[32..64]);
+        trace!("initiating link");
         let result = node.connect(&hash, &signing_key).await;
         let handle = match result {
             Ok(handle) => handle,
             Err(e) => {
                 let e = anyhow::Error::from(e);
-                sender.send(Err(e)).map_err(|e| {
+                response.send(Err(e)).map_err(|e| {
                     anyhow!(
                         "error when trying to send error back to connection requestor: {}",
                         e.err().unwrap()
@@ -209,16 +220,18 @@ impl ReticulumInstance {
                 return Ok(());
             }
         };
+        trace!("link initiated");
         let id = handle.link_id().clone();
         ctx.link_states.insert(id, LinkState::Pending);
         let request = ConnectionRequest {
             handle,
-            response: sender,
+            response: response,
             hash,
         };
         ctx.connect_requests.insert(id, request);
         Ok(())
     }
+    #[instrument(skip(node,ctx,destination,response), fields(destination.hash = destination.hash().to_string()))]
     async fn handle_listener_request(
         node: &mut ReticulumNode,
         ctx: &mut Context,
@@ -251,29 +264,31 @@ impl ReticulumInstance {
         }
         Ok(())
     }
+    #[instrument(skip(node, ctx, data))]
     async fn handle_to_send(
         node: &mut ReticulumNode,
         ctx: &mut Context,
         link_id: LinkId,
         data: Vec<u8>,
     ) -> Result<()> {
+        trace!(sent.bytes = data.len(), "sending resource");
         match node
             .send_resource(&link_id, data.as_slice(), None, true)
             .await
         {
             Ok(hash) => {
-                let hash = String::from_utf8_lossy(&hash);
+                let hash = hex::encode(hash);
                 trace!(
-                    "link {}: resource {}: initiated sending {} bytes",
-                    link_id,
-                    hash,
-                    data.len()
+                    resource.hash = hash,
+                    sent.bytes = data.len(),
+                    "initiated sending resource",
                 );
             }
-            Err(e) => return Err(anyhow::Error::from(e)),
+            Err(e) => return Err(anyhow::Error::from(e).context("sending resource")),
         }
         Ok(())
     }
+    #[instrument(skip(node, ctx, event))]
     async fn handle_event(
         node: &mut ReticulumNode,
         event: NodeEvent,
@@ -286,10 +301,7 @@ impl ReticulumInstance {
                 ..
             } => {
                 if !ctx.listeners.contains_key(&destination_hash) {
-                    debug!(
-                        "link {}: ignoring link request for unregistered destination {}",
-                        link_id, destination_hash
-                    );
+                    debug!("ignoring link request for unregistered destination",);
                     return Ok(());
                 }
                 let _handle = node.accept_link(&link_id).await.map_err(|e| {
@@ -308,29 +320,51 @@ impl ReticulumInstance {
                     .get_mut(&destination_hash)
                     .expect("desination has registered listener");
                 if let Err(_e) = listener.send(stream).await {
-                    debug!("destination {}: listener was dropped", destination_hash);
+                    warn!("channel to listener was closed. cleaning up listener");
                     ctx.listeners.remove(&destination_hash);
                 };
             }
             NodeEvent::LinkEstablished { link_id, .. } => {
                 ctx.link_states.insert(link_id, LinkState::Active);
-                debug!("link {}: established", link_id);
+                if let Some(request) = ctx.connect_requests.remove(&link_id) {
+                    debug!(request.destination = %request.hash, "link established for connection request");
+                    node.set_resource_strategy(
+                        &link_id,
+                        reticulum_core::ResourceStrategy::AcceptAll,
+                    )?;
+                    trace!("set resource strategy for link");
+                    let (sender, receiver) = tokio::sync::mpsc::channel(10);
+                    let stream = ReticulumStream {
+                        to_send: ctx.to_send_sender.clone(),
+                        received: receiver,
+                        link: link_id,
+                    };
+                    ctx.received.insert(link_id, sender);
+                    request.response.send(Ok(stream)).map_err(|_| {
+                        anyhow!(
+                            "error trying to send reticulum stream back to connection requestor"
+                        )
+                    })?;
+                } else {
+                    trace!("link established");
+                    node.set_resource_strategy(
+                        &link_id,
+                        reticulum_core::ResourceStrategy::AcceptAll,
+                    )?;
+                    trace!("set resource strategy for link");
+                }
             }
             NodeEvent::LinkStale { link_id } => {
-                debug!("link {}: has become stale", link_id);
+                debug!("link has become stale");
                 ctx.link_states.insert(link_id, LinkState::Stale);
             }
             NodeEvent::LinkRecovered { link_id } => {
-                debug!("link {}: has recovered", link_id);
+                debug!("link has recovered");
                 ctx.link_states.insert(link_id, LinkState::Active);
             }
             NodeEvent::LinkClosed {
-                link_id,
-                reason,
-                is_initiator,
-                destination_hash,
+                link_id, reason, ..
             } => {
-                debug!("link {}: closed with reason {:?}", link_id, reason);
                 ctx.received.remove(&link_id);
                 ctx.link_states.insert(link_id, LinkState::Closed);
                 if let Some(mut request) = ctx.connect_requests.remove(&link_id) {
@@ -350,42 +384,15 @@ impl ReticulumInstance {
                         .map_err(|e| anyhow::Error::from(e))?;
                 }
             }
-            NodeEvent::ResourceAdvertised {
-                link_id,
-                resource_hash,
-                transfer_size,
-                ..
-            } => {
+            NodeEvent::ResourceAdvertised { link_id, .. } => {
+                if !ctx.received.contains_key(&link_id) {
+                    debug!("no stream for link. Ignoring resource advertisement")
+                }
                 node.accept_resource(&link_id).await?;
-                trace!(
-                    "link {}: resource {}: accepted {} bytes",
-                    link_id,
-                    String::from_utf8_lossy(&resource_hash),
-                    transfer_size
-                );
+                trace!("resource accepted",);
             }
-            NodeEvent::ResourceTransferStarted {
-                link_id,
-                resource_hash,
-                is_sender,
-            } => trace!(
-                "link {}: resource {}: transfer started",
-                link_id,
-                String::from_utf8_lossy(&resource_hash)
-            ),
-            NodeEvent::ResourceProgress {
-                link_id,
-                resource_hash,
-                progress,
-                transfer_size,
-                data_size,
-                is_sender,
-            } => trace!(
-                "link {}: resource {}: transfer progress at {}",
-                link_id,
-                String::from_utf8_lossy(&resource_hash),
-                progress
-            ),
+            NodeEvent::ResourceTransferStarted { .. } => trace!("resource transfer started",),
+            NodeEvent::ResourceProgress { .. } => trace!("resource transfer progress"),
             NodeEvent::ResourceCompleted {
                 link_id,
                 resource_hash,
@@ -394,12 +401,9 @@ impl ReticulumInstance {
                 ..
             } => {
                 let data_len = data.len();
-                let resource_id = String::from_utf8_lossy(&resource_hash);
+                let resource_id = hex::encode(&resource_hash);
                 if is_sender {
-                    trace!(
-                        "link {}: resource {}: transfered {} bytes",
-                        link_id, resource_id, data_len
-                    );
+                    trace!("resource transfered complete",);
                     return Ok(());
                 }
                 let Some(sender) = ctx.received.get_mut(&link_id) else {
@@ -418,26 +422,23 @@ impl ReticulumInstance {
                         data_len
                     ));
                 };
-                trace!(
-                    "link {}: resource {}: received {} bytes",
-                    link_id,
-                    String::from_utf8_lossy(&resource_hash),
-                    data_len
-                );
+                trace!("resource received",);
             }
             NodeEvent::ResourceFailed {
                 link_id,
                 resource_hash,
                 error,
-                ..
-            } => warn!(
-                "link {}: resource {}: transfer failed: {}",
-                link_id,
-                String::from_utf8_lossy(&resource_hash),
-                error
-            ),
-            NodeEvent::InterfaceDown(id) => warn!("interface {}: down", id),
-            _ => {}
+                is_sender,
+            } => {
+                warn!(
+                    link.id = %link_id,
+                    resource.hash = hex::encode(resource_hash),
+                    %error, is_sender,
+                    "resource transfer failed"
+                );
+            }
+            NodeEvent::InterfaceDown(id) => warn!(id = id, "interface down"),
+            event => trace!(event = ?event, "received event"),
         }
         Ok(())
     }
@@ -451,6 +452,11 @@ impl AsyncRead for ReticulumStream {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.received.poll_recv(cx) {
             std::task::Poll::Ready(Some(data)) => {
+                trace!(
+                    received.bytes = data.len(),
+                    link.id = %self.link,
+                    "reading data from reticulum stream"
+                );
                 buf.put_slice(data.as_slice());
                 std::task::Poll::Ready(Ok(()))
             }
@@ -466,11 +472,12 @@ impl AsyncWrite for ReticulumStream {
         _cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        let data = buf.iter().cloned().collect();
+        let data: Vec<u8> = buf.iter().cloned().collect();
+        trace!(link.id = %self.link, "trying to send {} bytes over reticulum stream", data.len());
         match self.to_send.try_send((self.link, data)) {
             Ok(()) => std::task::Poll::Ready(Ok(buf.len())),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => std::task::Poll::Ready(Err(
-                std::io::Error::new(std::io::ErrorKind::ConnectionReset, ""),
+                std::io::Error::new(std::io::ErrorKind::ConnectionReset, "receiver closed"),
             )),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => std::task::Poll::Pending,
         }
@@ -488,6 +495,10 @@ impl AsyncWrite for ReticulumStream {
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         self.received.close();
-        std::task::Poll::Ready(Ok(()))
+        if self.received.is_empty() {
+            std::task::Poll::Ready(Ok(()))
+        } else {
+            std::task::Poll::Pending
+        }
     }
 }

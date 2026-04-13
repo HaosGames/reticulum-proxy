@@ -9,11 +9,17 @@ use reticulum_std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time;
+use tracing::level_filters::LevelFilter;
 
 static INIT: Once = Once::new();
 
 fn setup() {
-    INIT.call_once(|| tracing_subscriber::fmt().compact().init());
+    INIT.call_once(|| {
+        tracing_subscriber::fmt()
+            .compact()
+            .with_max_level(LevelFilter::TRACE)
+            .init()
+    });
 }
 
 async fn build_transport_full(
@@ -50,7 +56,7 @@ async fn send_receive() {
     let _transport_b = build_transport("b", "127.0.0.1:8082", &["127.0.0.1:8081"]).await;
     let transport_c = build_transport("c", "127.0.0.1:8083", &["127.0.0.1:8082"]).await;
     let id_a = Identity::generate(&mut OsRng);
-    let dest_a = Destination::new(
+    let mut dest_a = Destination::new(
         Some(id_a),
         Direction::In,
         DestinationType::Single,
@@ -58,6 +64,7 @@ async fn send_receive() {
         &[],
     )
     .unwrap();
+    dest_a.set_accepts_links(true);
     let dest_a_hash = dest_a.hash().clone();
 
     let mut instance_a = ReticulumInstance::new(transport_a).await;
@@ -81,9 +88,10 @@ async fn send_receive() {
         let connector = instance_c.connector();
         let mut stream = connector.connect(dest_a_hash).await.unwrap();
         stream.write(message.as_bytes()).await.unwrap();
+        instance_c
     });
-    receive_loop.await.unwrap();
     send_loop.await.unwrap();
+    receive_loop.await.unwrap();
 }
 
 #[tokio::test]
@@ -94,7 +102,7 @@ async fn send_receive_reverse() {
     let _transport_b = build_transport("b", "127.0.0.1:8182", &["127.0.0.1:8181"]).await;
     let transport_c = build_transport("c", "127.0.0.1:8183", &["127.0.0.1:8182"]).await;
     let id_a = Identity::generate(&mut OsRng);
-    let dest_a = Destination::new(
+    let mut dest_a = Destination::new(
         Some(id_a),
         Direction::In,
         DestinationType::Single,
@@ -102,8 +110,8 @@ async fn send_receive_reverse() {
         &[],
     )
     .unwrap();
+    dest_a.set_accepts_links(true);
     let dest_a_hash = dest_a.hash().clone();
-    time::sleep(Duration::from_secs(1)).await;
 
     let mut instance_a = ReticulumInstance::new(transport_a).await;
     let mut instance_c = ReticulumInstance::new(transport_c).await;
@@ -113,11 +121,12 @@ async fn send_receive_reverse() {
         let mut listener = instance_a.listener(dest_a).await.unwrap();
         if let Some(mut stream) = listener.listen().await {
             stream.write(message.as_bytes()).await.unwrap();
-            time::sleep(Duration::from_secs(1)).await;
         } else {
             info!("Listener ended");
         }
+        instance_a
     });
+    time::sleep(Duration::from_secs(5)).await;
     let connect_handle = tokio::spawn(async move {
         let connector = instance_c.connector();
         let mut stream = connector.connect(dest_a_hash).await.unwrap();
@@ -134,6 +143,7 @@ async fn send_receive_reverse() {
             break;
         }
     });
+    time::sleep(Duration::from_secs(3)).await;
     connect_handle.await.unwrap();
     listen_handle.await.unwrap();
 }
