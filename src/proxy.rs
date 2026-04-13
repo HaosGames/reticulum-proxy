@@ -19,8 +19,7 @@ use std::{
 use structopt::StructOpt;
 use tokio::{net::TcpListener, sync::RwLock, task};
 use tracing::{
-    Instrument, Level, debug, error, event, info, instrument, level_filters::LevelFilter, span,
-    warn,
+    Instrument, Level, debug, error, info, instrument, level_filters::LevelFilter, span, warn,
 };
 
 /// # How to use it:

@@ -4,7 +4,6 @@ use reticulum_core::link::LinkState;
 use reticulum_std::{Destination, DestinationHash, LinkHandle, LinkId, NodeEvent, ReticulumNode};
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Display,
     time::Duration,
 };
 use tokio::{
@@ -12,8 +11,9 @@ use tokio::{
     select,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Value, debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
+#[allow(unused)]
 pub struct ReticulumInstance {
     event_loop: tokio::task::JoinHandle<()>,
     cancel: CancellationToken,
@@ -62,6 +62,7 @@ pub struct ReticulumStream {
     link: LinkId,
 }
 
+#[allow(unused)]
 struct Context {
     listeners: HashMap<DestinationHash, tokio::sync::mpsc::Sender<ReticulumStream>>,
     to_send_sender: tokio::sync::mpsc::Sender<(LinkId, Vec<u8>)>,
@@ -264,10 +265,10 @@ impl ReticulumInstance {
         }
         Ok(())
     }
-    #[instrument(skip(node, ctx, data))]
+    #[instrument(skip(node, _ctx, data))]
     async fn handle_to_send(
         node: &mut ReticulumNode,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         link_id: LinkId,
         data: Vec<u8>,
     ) -> Result<()> {
@@ -362,9 +363,7 @@ impl ReticulumInstance {
                 debug!("link has recovered");
                 ctx.link_states.insert(link_id, LinkState::Active);
             }
-            NodeEvent::LinkClosed {
-                link_id, reason, ..
-            } => {
+            NodeEvent::LinkClosed { link_id, .. } => {
                 ctx.received.remove(&link_id);
                 ctx.link_states.insert(link_id, LinkState::Closed);
                 if let Some(mut request) = ctx.connect_requests.remove(&link_id) {

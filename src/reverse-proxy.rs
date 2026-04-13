@@ -12,7 +12,7 @@ use tokio::{
     select,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, debug, error, info, instrument, level_filters::LevelFilter, span};
+use tracing::{debug, error, info, instrument, level_filters::LevelFilter};
 
 /// JSON mapping configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
