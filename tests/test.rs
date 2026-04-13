@@ -120,18 +120,19 @@ async fn send_receive_reverse() {
     let listen_handle = tokio::spawn(async move {
         let mut listener = instance_a.listener(dest_a).await.unwrap();
         if let Some(mut stream) = listener.listen().await {
+            time::sleep(Duration::from_secs(3)).await;
             stream.write(message.as_bytes()).await.unwrap();
         } else {
             info!("Listener ended");
         }
         instance_a
     });
-    time::sleep(Duration::from_secs(5)).await;
+    time::sleep(Duration::from_secs(3)).await;
     let connect_handle = tokio::spawn(async move {
         let connector = instance_c.connector();
         let mut stream = connector.connect(dest_a_hash).await.unwrap();
         loop {
-            time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(3)).await;
             let mut buffer = BytesMut::with_capacity(3);
             stream.read_buf(&mut buffer).await.unwrap();
             if buffer.is_empty() {

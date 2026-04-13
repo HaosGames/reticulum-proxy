@@ -150,7 +150,7 @@ impl ReticulumInstance {
                     }
                 };
                 if let Err(error) = result {
-                    error!("{error}");
+                    error!("{:#}", error);
                 }
             }
         });
