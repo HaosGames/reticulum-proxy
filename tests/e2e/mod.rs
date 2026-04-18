@@ -5,11 +5,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use reticulum::{
-    identity::PrivateIdentity,
-    iface::tcp_server::TcpServer,
-    transport::{Transport, TransportConfig},
-};
+use rand_core::OsRng;
+use reticulum_std::{Identity, ReticulumNode, ReticulumNodeBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
@@ -27,32 +24,19 @@ pub fn rns_config_path() -> PathBuf {
 }
 
 /// Start a Rust-based hub that routes packets between connected clients
-pub async fn start_hub() -> Transport {
-    let identity = PrivateIdentity::new_from_name("hub");
-    let mut config = TransportConfig::new("hub", &identity, true); // enable_transport = true
-    config.set_retransmit(true);
-    let mut transport = Transport::new(config);
-
-    // Create a dummy destination so the hub is a proper Reticulum node
-    // This helps with announcement propagation
-    let dummy_id = PrivateIdentity::new_from_name("hub_dummy");
-    let _dest = transport
-        .add_destination(
-            dummy_id,
-            reticulum::destination::DestinationName::new("hub", "tcp"),
-        )
-        .await;
-
-    // Spawn TCP server interface
-    transport.iface_manager().lock().await.spawn(
-        TcpServer::new("127.0.0.1:4711", transport.iface_manager()),
-        TcpServer::spawn,
-    );
+pub async fn start_hub() -> ReticulumNode {
+    let identity = Identity::generate(&mut OsRng);
+    let builder = ReticulumNodeBuilder::new()
+        .identity(identity.clone())
+        .add_tcp_server("127.0.0.1:4711".parse().unwrap())
+        .enable_transport(true);
+    let mut node = builder.build().await.unwrap();
+    node.start().await.unwrap();
 
     // Wait for server to start
     sleep(Duration::from_millis(500)).await;
 
-    transport
+    node
 }
 
 /// Start TCP echo server using socat

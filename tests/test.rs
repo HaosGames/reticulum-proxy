@@ -3,21 +3,22 @@ use std::{sync::Once, time::Duration};
 use bytes::BytesMut;
 use log::info;
 use rand_core::OsRng;
-use reticulum::{
-    destination::DestinationName,
-    identity::PrivateIdentity,
-    iface::{tcp_client::TcpClient, tcp_server::TcpServer},
-    transport::{Transport, TransportConfig},
+use reticulum_proxy::ReticulumInstance;
+use reticulum_std::{
+    Destination, DestinationType, Direction, Identity, ReticulumNode, ReticulumNodeBuilder,
 };
-use socks5_reticulum_proxy::ReticulumInstance;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time;
+use tracing::level_filters::LevelFilter;
 
 static INIT: Once = Once::new();
 
 fn setup() {
     INIT.call_once(|| {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init()
+        tracing_subscriber::fmt()
+            .compact()
+            .with_max_level(LevelFilter::TRACE)
+            .init()
     });
 }
 
@@ -26,34 +27,24 @@ async fn build_transport_full(
     server_addr: &str,
     client_addr: &[&str],
     retransmit: bool,
-) -> Transport {
-    let mut config = TransportConfig::new(name, &PrivateIdentity::new_from_rand(OsRng), true);
-
-    if retransmit {
-        config.set_retransmit(true);
+) -> ReticulumNode {
+    let identity = Identity::generate(&mut OsRng);
+    let mut builder = ReticulumNodeBuilder::new()
+        .identity(identity.clone())
+        .add_tcp_server(server_addr.parse().unwrap())
+        .enable_transport(retransmit);
+    for client_addr in client_addr {
+        builder = builder.add_tcp_client(client_addr.parse().unwrap());
     }
-
-    let transport = Transport::new(config);
-
-    transport.iface_manager().lock().await.spawn(
-        TcpServer::new(server_addr, transport.iface_manager()),
-        TcpServer::spawn,
-    );
-
-    for &addr in client_addr {
-        transport
-            .iface_manager()
-            .lock()
-            .await
-            .spawn(TcpClient::new(addr), TcpClient::spawn);
-    }
+    let mut node = builder.build().await.unwrap();
+    node.start().await.unwrap();
 
     log::info!("test: transport {} created", name);
 
-    transport
+    node
 }
 
-async fn build_transport(name: &str, server_addr: &str, client_addr: &[&str]) -> Transport {
+async fn build_transport(name: &str, server_addr: &str, client_addr: &[&str]) -> ReticulumNode {
     build_transport_full(name, server_addr, client_addr, true).await
 }
 
@@ -61,25 +52,28 @@ async fn build_transport(name: &str, server_addr: &str, client_addr: &[&str]) ->
 async fn send_receive() {
     setup();
 
-    let mut transport_a = build_transport("a", "127.0.0.1:8081", &[]).await;
+    let transport_a = build_transport("a", "127.0.0.1:8081", &[]).await;
     let _transport_b = build_transport("b", "127.0.0.1:8082", &["127.0.0.1:8081"]).await;
     let transport_c = build_transport("c", "127.0.0.1:8083", &["127.0.0.1:8082"]).await;
-    let id_a = PrivateIdentity::new_from_name("a");
-    let dest_a = transport_a
-        .add_destination(id_a, DestinationName::new("test", "hop"))
-        .await;
-    let dest_a_hash = dest_a.lock().await.desc.address_hash;
-    transport_a.send_announce(&dest_a, None).await;
-    transport_c.recv_announces().await;
-    transport_c.request_path(&dest_a_hash, None, None).await;
-    time::sleep(Duration::from_secs(1)).await;
+    let id_a = Identity::generate(&mut OsRng);
+    let mut dest_a = Destination::new(
+        Some(id_a),
+        Direction::In,
+        DestinationType::Single,
+        "test_a",
+        &[],
+    )
+    .unwrap();
+    dest_a.set_accepts_links(true);
+    let dest_a_hash = dest_a.hash().clone();
 
-    let instance_a = ReticulumInstance::new(transport_a).await;
-    let instance_c = ReticulumInstance::new(transport_c).await;
+    let mut instance_a = ReticulumInstance::new(transport_a).await;
+    let mut instance_c = ReticulumInstance::new(transport_c).await;
 
     let message = "foo";
     let receive_loop = tokio::spawn(async move {
-        if let Some(mut stream) = instance_a.listen(dest_a_hash).await {
+        let mut listener = instance_a.listener(dest_a).await.unwrap();
+        if let Some(mut stream) = listener.listen().await {
             let mut buffer = [0; 3];
             stream.read(&mut buffer).await.unwrap();
             let received = String::from_utf8_lossy(&buffer).to_string();
@@ -89,47 +83,56 @@ async fn send_receive() {
             info!("Listen for connection ended");
         }
     });
+    time::sleep(Duration::from_secs(3)).await;
     let send_loop = tokio::spawn(async move {
-        let mut stream = instance_c.connect(dest_a_hash).await.unwrap();
+        let connector = instance_c.connector();
+        let mut stream = connector.connect(dest_a_hash).await.unwrap();
         stream.write(message.as_bytes()).await.unwrap();
+        instance_c
     });
-    receive_loop.await.unwrap();
     send_loop.await.unwrap();
+    receive_loop.await.unwrap();
 }
 
 #[tokio::test]
 async fn send_receive_reverse() {
     setup();
 
-    let mut transport_a = build_transport("a", "127.0.0.1:8181", &[]).await;
+    let transport_a = build_transport("a", "127.0.0.1:8181", &[]).await;
     let _transport_b = build_transport("b", "127.0.0.1:8182", &["127.0.0.1:8181"]).await;
     let transport_c = build_transport("c", "127.0.0.1:8183", &["127.0.0.1:8182"]).await;
-    let id_a = PrivateIdentity::new_from_name("a");
-    let dest_a = transport_a
-        .add_destination(id_a, DestinationName::new("test", "hop"))
-        .await;
-    let dest_a_hash = dest_a.lock().await.desc.address_hash;
-    transport_a.send_announce(&dest_a, None).await;
-    transport_c.recv_announces().await;
-    transport_c.request_path(&dest_a_hash, None, None).await;
-    time::sleep(Duration::from_secs(1)).await;
+    let id_a = Identity::generate(&mut OsRng);
+    let mut dest_a = Destination::new(
+        Some(id_a),
+        Direction::In,
+        DestinationType::Single,
+        "test_a",
+        &[],
+    )
+    .unwrap();
+    dest_a.set_accepts_links(true);
+    let dest_a_hash = dest_a.hash().clone();
 
-    let instance_a = ReticulumInstance::new(transport_a).await;
-    let instance_c = ReticulumInstance::new(transport_c).await;
+    let mut instance_a = ReticulumInstance::new(transport_a).await;
+    let mut instance_c = ReticulumInstance::new(transport_c).await;
 
     let message = "foo";
     let listen_handle = tokio::spawn(async move {
-        if let Some(mut stream) = instance_a.listen(dest_a_hash).await {
+        let mut listener = instance_a.listener(dest_a).await.unwrap();
+        if let Some(mut stream) = listener.listen().await {
+            time::sleep(Duration::from_secs(3)).await;
             stream.write(message.as_bytes()).await.unwrap();
-            time::sleep(Duration::from_secs(1)).await;
         } else {
             info!("Listener ended");
         }
+        instance_a
     });
+    time::sleep(Duration::from_secs(3)).await;
     let connect_handle = tokio::spawn(async move {
-        let mut stream = instance_c.connect(dest_a_hash).await.unwrap();
+        let connector = instance_c.connector();
+        let mut stream = connector.connect(dest_a_hash).await.unwrap();
         loop {
-            time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(3)).await;
             let mut buffer = BytesMut::with_capacity(3);
             stream.read_buf(&mut buffer).await.unwrap();
             if buffer.is_empty() {
@@ -141,6 +144,7 @@ async fn send_receive_reverse() {
             break;
         }
     });
+    time::sleep(Duration::from_secs(3)).await;
     connect_handle.await.unwrap();
     listen_handle.await.unwrap();
 }

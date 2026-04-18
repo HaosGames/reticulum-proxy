@@ -1,5 +1,5 @@
 [package]
-name = "socks5-reticulum-proxy"
+name = "reticulum-proxy"
 version = "0.1.0"
 edition = "2024"
 
@@ -23,8 +23,14 @@ env_logger = "0.11"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 serde_json = "1"
 serde = "1"
+tracing-subscriber = "0.3"
+tracing = "0.1"
+hex = "0.4.3"
 
-[dependencies.reticulum]
-git = "https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs"
-#path = "../../remote/Reticulum-rs"
-version = "0.1.*"
+[dependencies.reticulum-std]
+git = "https://codeberg.org/Lew_Palm/leviculum"
+branch = "master"
+
+[dependencies.reticulum-core]
+git = "https://codeberg.org/Lew_Palm/leviculum"
+branch = "master"
